@@ -1,0 +1,28 @@
+# runtime data
+data/
+.tmp/
+*.db
+*.db-wal
+*.db-shm
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# node
+frontend/node_modules/
+frontend/dist/
+
+# scratch
+shots/
+scripts_*.py
+.reference/
+
+# os
+Thumbs.db
+.DS_Store
+
+frontend/*.tsbuildinfo
+
