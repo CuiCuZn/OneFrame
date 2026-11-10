@@ -289,6 +289,7 @@ def build_request(
     refs: list[RefImage],
     count: int,
     params: dict[str, Any],
+    mask: RefImage | None = None,
 ) -> GenRequest:
     return GenRequest(
         model=upstream_model,
@@ -297,4 +298,5 @@ def build_request(
         refs=refs,
         count=max(1, count),
         params={key: value for key, value in params.items() if value not in (None, "")},
+        mask=mask,
     )

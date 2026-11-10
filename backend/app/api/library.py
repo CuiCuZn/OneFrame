@@ -47,6 +47,7 @@ def list_library(
     category: str = Query(default="", max_length=120),
     facet: list[str] = Query(default=[]),
     favorite: bool | None = None,
+    depth: bool = Query(default=False),
     limit: int = Query(default=48, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     conn: sqlite3.Connection = Depends(get_conn),
@@ -58,6 +59,7 @@ def list_library(
         category=category,
         facets=_pairs(facet),
         favorite=favorite,
+        depth_only=depth,
         limit=limit,
         offset=offset,
         include_nsfw=_include_nsfw(conn),
@@ -91,6 +93,37 @@ def reclassify():
         return library.rebuild_taxonomy(conn)
 
 
+@router.get("/random")
+def random_library(
+    kind: str = Query(default="", max_length=20),
+    q: str = Query(default="", max_length=200),
+    category: str = Query(default="", max_length=120),
+    facet: list[str] = Query(default=[]),
+    exclude: str = Query(default="", max_length=500),
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    item = library.random_item(
+        conn,
+        kind=kind,
+        query=q,
+        category=category,
+        facets=_pairs(facet),
+        exclude=[value for value in exclude.split(",") if value],
+        include_nsfw=_include_nsfw(conn),
+    )
+    if not item:
+        raise NotFound("没有匹配的素材")
+    return item
+
+
+@router.get("/{item_id}/variants")
+def item_variants(item_id: str, conn: sqlite3.Connection = Depends(get_conn)):
+    data = library.item_variants(conn, item_id)
+    if not data:
+        raise NotFound("素材不存在")
+    return data
+
+
 @router.post("/assets/{asset_id}")
 def import_asset(asset_id: str, conn: sqlite3.Connection = Depends(get_conn)):
     """Save one generated work into the reference library (index in place)."""
@@ -102,11 +135,8 @@ def import_asset(asset_id: str, conn: sqlite3.Connection = Depends(get_conn)):
         raise Conflict("只有图片作品可以加入参考库")
     item_id, created = library.add_asset_reference(conn, asset)
     row = db.one(conn, "SELECT * FROM library_items WHERE id = ?", (item_id,))
-    row["meta"] = db.loads(row["meta"], {})
     row["facets"] = library.item_facets(conn, item_id)
-    row["url"] = f"/api/library/{item_id}/file"
-    row["thumb_url"] = f"/api/library/{item_id}/file?size=thumb"
-    return {"item": row, "created": created}
+    return {"item": library.serialize_item(row), "created": created}
 
 
 @router.post("/import")
@@ -133,11 +163,8 @@ def patch_item(item_id: str, data: LibraryPatch, conn: sqlite3.Connection = Depe
     if data.tags is not None:
         conn.execute("UPDATE library_items SET tags=? WHERE id=?", (data.tags, item_id))
     row = db.one(conn, "SELECT * FROM library_items WHERE id = ?", (item_id,))
-    row["meta"] = db.loads(row["meta"], {})
     row["facets"] = library.item_facets(conn, item_id)
-    row["url"] = f"/api/library/{item_id}/file"
-    row["thumb_url"] = f"/api/library/{item_id}/file?size=thumb"
-    return row
+    return library.serialize_item(row)
 
 
 @router.delete("/{item_id}")
@@ -150,10 +177,15 @@ def delete_item(item_id: str, conn: sqlite3.Connection = Depends(get_conn)):
 def item_file(
     item_id: str,
     size: str = Query(default="full"),
+    variant: str = Query(default="base"),
     conn: sqlite3.Connection = Depends(get_conn),
 ):
+    if variant not in ("base", "depth"):
+        raise Conflict("不支持的图片版本")
     try:
-        path, _ = library.file_for(conn, item_id, prefer_thumb=size == "thumb")
+        path, _ = library.file_for(
+            conn, item_id, prefer_thumb=size == "thumb", variant=variant
+        )
     except FileNotFoundError as exc:
         raise NotFound(str(exc)) from exc
     media_type = IMAGE_TYPES.get(path.suffix.lower(), "image/webp")
@@ -185,7 +217,5 @@ def upload_reference(
         )
         row = db.one(conn, "SELECT * FROM library_items WHERE id = ?", (item_id,))
         row["facets"] = library.item_facets(conn, item_id)
-        row["url"] = f"/api/library/{item_id}/file"
-        row["thumb_url"] = f"/api/library/{item_id}/file?size=thumb"
-        created.append(row)
+        created.append(library.serialize_item(row))
     return {"items": created}

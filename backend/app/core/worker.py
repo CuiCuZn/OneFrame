@@ -34,6 +34,24 @@ def _set(conn, job_id: str, **fields: Any) -> None:
     conn.execute(f"UPDATE jobs SET {columns} WHERE id = ?", (*fields.values(), job_id))
 
 
+def _refs_snapshot(refs: list[dict]) -> list[dict[str, Any]]:
+    snapshot: list[dict[str, Any]] = []
+    for ref in refs or []:
+        entry: dict[str, Any] = {
+            "role": ref.get("role") or "reference",
+            "name": ref.get("name") or "",
+            "variant": ref.get("variant") or "base",
+        }
+        if ref.get("asset_id"):
+            entry.update({"source": "asset", "id": ref["asset_id"]})
+        elif ref.get("library_id"):
+            entry.update({"source": "library", "id": ref["library_id"]})
+        else:
+            continue
+        snapshot.append(entry)
+    return snapshot
+
+
 def _load_ref(path: Path, role: str, name: str, max_side: int = 2048) -> RefImage:
     data = path.read_bytes()
     mime = storage.sniff_mime(data)
@@ -66,8 +84,10 @@ def _resolve_refs(conn, refs: list[dict], modality: str) -> list[RefImage]:
         elif ref.get("library_id"):
             item = db.one(conn, "SELECT * FROM library_items WHERE id = ?", (ref["library_id"],))
             if item:
-                candidate = Path(item["image_path"])
-                path = candidate if candidate.exists() and library.is_allowed(candidate) else None
+                variant = ref.get("variant") or "base"
+                rel = item.get("depth_path") if variant == "depth" and item.get("depth_path") else item.get("image_path")
+                candidate = Path(rel) if rel else None
+                path = candidate if candidate and candidate.exists() and library.is_allowed(candidate) else None
                 name = name if name != "reference" else (item.get("title") or "reference")[:40]
         if not path or not path.exists():
             continue
@@ -77,6 +97,40 @@ def _resolve_refs(conn, refs: list[dict], modality: str) -> list[RefImage]:
             raise Unsupported("参考图总大小超过 30MB，请先压缩")
         resolved.append(ref_image)
     return resolved
+
+
+def _load_mask(request: dict) -> RefImage | None:
+    rel = request.get("mask_path")
+    if not rel:
+        return None
+    path = storage.resolve_media(rel)
+    if not path:
+        raise Unsupported("蒙版文件已丢失")
+    data = path.read_bytes()
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise Unsupported("蒙版不是 PNG")
+    return RefImage(name="mask", mime="image/png", data=data, role="mask")
+
+
+def _align_mask(refs: list[RefImage], mask: RefImage | None) -> RefImage | None:
+    """Provider edits require image and mask to share exactly one pixel size."""
+
+    if not mask or not refs or not refs[0].data or not mask.data:
+        return mask
+    try:
+        with Image.open(io.BytesIO(refs[0].data)) as source:
+            size = source.size
+        with Image.open(io.BytesIO(mask.data)) as layer:
+            layer = layer.convert("RGBA")
+            if layer.size != size:
+                layer = layer.resize(size, Image.NEAREST)
+            buffer = io.BytesIO()
+            layer.save(buffer, "PNG")
+        mask.data = buffer.getvalue()
+        mask.mime = "image/png"
+        return mask
+    except Exception as exc:
+        raise Unsupported("蒙版与源图尺寸不匹配") from exc
 
 
 def _transport_error(exc: Exception) -> ProviderError:
@@ -249,6 +303,18 @@ class JobRunner:
                 )
                 return
 
+        try:
+            req.mask = _load_mask(request)
+        except (Unsupported, OSError) as exc:
+            with db.connect() as conn:
+                _set(conn, job_id, status="failed", stage="失败", error=str(exc), finished_at=db.now())
+            return
+        if req.mask and len(refs) != 1:
+            with db.connect() as conn:
+                _set(conn, job_id, status="failed", stage="失败", error="局部重绘需要且只需要一张源图", finished_at=db.now())
+            return
+        req.mask = _align_mask(refs, req.mask)
+
         target = router.target(model)
         await self._attempt_once(job_id, target, req, refs, request, key)
 
@@ -268,6 +334,7 @@ class JobRunner:
             refs=refs,
             count=req.count,
             params=req.params,
+            mask=req.mask,
         )
         await self._set_async(job_id, stage=f"提交到 {target.channel_name}", progress=0.05)
         key_secret = crypto.decrypt(key["secret"]) if key else ""
@@ -463,7 +530,25 @@ class JobRunner:
     # ── finishing ──────────────────────────────────────────────────────────
     async def _finish(self, job_id, target, request, outputs, external_url=None) -> None:
         assets: list[str] = []
-        for output in outputs:
+        refs_snapshot = _refs_snapshot(request.get("refs", []))
+        source_id = (request.get("options") or {}).get("source_asset_id")
+        parent_id = root_id = None
+        next_version = 1
+        if source_id:
+            with db.connect() as conn:
+                source = db.one(conn, "SELECT * FROM assets WHERE id = ?", (source_id,))
+                if source:
+                    parent_id = source["id"]
+                    root_id = source.get("root_id") or source["id"]
+                    next_version = int(
+                        db.scalar(
+                            conn,
+                            "SELECT COALESCE(MAX(version), 0) + 1 FROM assets WHERE root_id = ?",
+                            (root_id,),
+                        )
+                        or 1
+                    )
+        for index, output in enumerate(outputs):
             data = output.data
             if not data and output.url:
                 try:
@@ -485,13 +570,16 @@ class JobRunner:
                 if seconds > 0:
                     record["duration_ms"] = int(seconds * 1000)
             asset_id = db.new_id()
+            asset_root = root_id or asset_id
+            asset_version = (next_version + index) if root_id else 1
             with db.connect() as conn:
                 conn.execute(
                     """
                     INSERT INTO assets
                       (id, kind, path, thumb_path, poster_path, width, height, duration_ms, bytes,
-                       job_id, prompt, negative, model_id, model_name, params, origin, meta, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'generated', ?, ?)
+                       job_id, prompt, negative, model_id, model_name, params, origin, meta,
+                       parent_id, root_id, tool, version, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'generated', ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         asset_id,
@@ -512,11 +600,19 @@ class JobRunner:
                         db.dumps(
                             {
                                 "ratio": request.get("params", {}).get("aspect_ratio"),
-                                "refs": len(request.get("refs", [])),
+                                "refs": len(refs_snapshot),
+                                "refs_snapshot": refs_snapshot,
                                 "channel": target.channel_name,
                                 "upstream_model": target.upstream_model,
+                                "tool": request.get("tool", ""),
+                                "options": request.get("options", {}),
+                                "source_asset_id": source_id,
                             }
                         ),
+                        parent_id,
+                        asset_root,
+                        request.get("tool", ""),
+                        asset_version,
                         db.now(),
                     ),
                 )

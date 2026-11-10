@@ -33,6 +33,7 @@ class GenRequest:
     refs: list[RefImage] = field(default_factory=list)
     count: int = 1
     params: dict[str, Any] = field(default_factory=dict)
+    mask: RefImage | None = None
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.params.get(key, default)
@@ -94,6 +95,7 @@ class Adapter:
     modalities: set[str] = {"image"}
     supports_reference: bool = False
     supports_video: bool = False
+    supports_mask: bool = False
     # Parameter keys this adapter understands (used for the model editor).
     param_keys: tuple[str, ...] = ()
     # Public description shown in the UI.
@@ -104,6 +106,8 @@ class Adapter:
             raise Unsupported("生成数量至少为 1")
         if req.refs and not self.supports_reference:
             raise Unsupported("该协议不支持参考图")
+        if req.mask and not self.supports_mask:
+            raise Unsupported("当前协议不支持局部重绘")
 
     async def submit(self, ctx: ProviderContext) -> SubmitResult:  # pragma: no cover
         raise NotImplementedError

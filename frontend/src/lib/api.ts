@@ -1,6 +1,7 @@
 import type {
   Asset,
   AssetList,
+  AssetRef,
   Caps,
   Catalog,
   Channel,
@@ -13,6 +14,8 @@ import type {
   Model,
   Modality,
   Price,
+  PromptEnhanceResult,
+  PromptItem,
   Stats,
   SystemInfo,
 } from "./types";
@@ -137,6 +140,15 @@ export const api = {
       query.set("offset", String(params.offset ?? 0));
       return request<AssetList>(`/api/assets?${query.toString()}`);
     },
+    refs: (id: string) => request<{ items: AssetRef[] }>(`/api/assets/${id}/refs`),
+    referenceZipUrl: (id: string) => `/api/assets/${id}/references.zip`,
+    importUrl: (url: string) => request<Asset>("/api/assets/import-url", json({ url })),
+    split: (id: string, body: { rows: number; columns: number; cells?: number[] }) =>
+      request<{ items: Asset[] }>(`/api/assets/${id}/split`, json(body)),
+    upscale: (id: string, factor: 2 | 4) =>
+      request<Asset>(`/api/assets/${id}/upscale`, json({ factor })),
+    versions: (id: string) =>
+      request<{ root_id: string; current_id: string; items: Asset[] }>(`/api/assets/${id}/versions`),
     patch: (id: string, body: { favorite?: boolean; tags?: string }) =>
       request<Asset>(`/api/assets/${id}`, patch(body)),
     remove: (id: string) => request<{ ok: boolean }>(`/api/assets/${id}`, { method: "DELETE" }),
@@ -155,6 +167,7 @@ export const api = {
       category?: string;
       facets?: string[];
       favorite?: boolean;
+      depth?: boolean;
       limit?: number;
       offset?: number;
     } = {}) => {
@@ -169,6 +182,30 @@ export const api = {
       });
       return request<{ items: LibraryItem[]; total: number }>(`/api/library?${query.toString()}`);
     },
+    random: (params: {
+      kind?: string;
+      q?: string;
+      category?: string;
+      facets?: string[];
+      exclude?: string[];
+    } = {}) => {
+      const query = new URLSearchParams();
+      Object.entries(params).forEach(([key, value]) => {
+        if (value === undefined || value === "") return;
+        if (key === "facets" && Array.isArray(value)) {
+          value.forEach((facet) => query.append("facet", facet));
+          return;
+        }
+        if (key === "exclude" && Array.isArray(value)) {
+          if (value.length) query.set("exclude", value.join(","));
+          return;
+        }
+        query.set(key, String(value));
+      });
+      return request<LibraryItem>(`/api/library/random?${query.toString()}`);
+    },
+    variants: (id: string) =>
+      request<{ group_key: string; items: LibraryItem[] }>(`/api/library/${id}/variants`),
     facets: (params: { kind?: string; q?: string; favorite?: boolean; facets?: string[] } = {}) => {
       const query = new URLSearchParams();
       Object.entries(params).forEach(([key, value]) => {
@@ -185,7 +222,16 @@ export const api = {
     fromAsset: (assetId: string) =>
       request<{ item: LibraryItem; created: boolean }>(`/api/library/assets/${assetId}`, { method: "POST" }),
     import: (mode: "folder" | "pose_gallery", path: string, kind: string) =>
-      request<{ added: number; scanned: number; root: string }>("/api/library/import", json({ mode, path, kind })),
+      request<{
+        added: number;
+        updated?: number;
+        scanned: number;
+        skipped_remote?: number;
+        skipped_missing?: number;
+        depth_added?: number;
+        sources?: Record<string, number>;
+        root: string;
+      }>("/api/library/import", json({ mode, path, kind })),
     patch: (id: string, body: { favorite?: boolean; tags?: string }) =>
       request<LibraryItem>(`/api/library/${id}`, patch(body)),
     remove: (id: string) => request<{ ok: boolean }>(`/api/library/${id}`, { method: "DELETE" }),
@@ -200,6 +246,36 @@ export const api = {
   },
 
   stats: () => request<Stats>("/api/stats"),
+  prompts: {
+    list: (params: { category?: string; q?: string; favorite?: boolean } = {}) => {
+      const query = new URLSearchParams();
+      if (params.category) query.set("category", params.category);
+      if (params.q) query.set("q", params.q);
+      if (params.favorite !== undefined) query.set("favorite", String(params.favorite));
+      return request<{ items: PromptItem[]; total: number }>(`/api/prompts?${query.toString()}`);
+    },
+    create: (body: {
+      title: string;
+      category: string;
+      text: string;
+      negative?: string;
+      tags?: string;
+      favorite?: boolean;
+    }) => request<PromptItem>("/api/prompts", json(body)),
+    update: (id: string, body: Record<string, unknown>) =>
+      request<PromptItem>(`/api/prompts/${id}`, put(body)),
+    favorite: (id: string) =>
+      request<PromptItem>(`/api/prompts/${id}/favorite`, { method: "POST" }),
+    remove: (id: string) => request<{ ok: boolean }>(`/api/prompts/${id}`, { method: "DELETE" }),
+  },
+  enhancePrompt: (body: {
+    prompt: string;
+    negative?: string;
+    style?: string;
+    modality?: string;
+    has_refs?: boolean;
+    language?: string;
+  }) => request<PromptEnhanceResult>("/api/prompt/enhance", json(body)),
   system: () => request<SystemInfo>("/api/system"),
   settings: {
     get: () => request<Record<string, string>>("/api/settings"),

@@ -109,6 +109,10 @@ CREATE TABLE IF NOT EXISTS assets (
   tags TEXT NOT NULL DEFAULT '',
   origin TEXT NOT NULL DEFAULT 'generated',
   meta TEXT NOT NULL DEFAULT '{}',
+  parent_id TEXT,
+  root_id TEXT,
+  tool TEXT NOT NULL DEFAULT '',
+  version INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_assets_created ON assets(created_at DESC);
@@ -127,6 +131,11 @@ CREATE TABLE IF NOT EXISTS library_items (
   search_text TEXT NOT NULL DEFAULT '',
   image_path TEXT NOT NULL,
   thumb_path TEXT,
+  depth_path TEXT,
+  depth_thumb_path TEXT,
+  has_depth INTEGER NOT NULL DEFAULT 0,
+  group_key TEXT NOT NULL DEFAULT '',
+  variant_label TEXT NOT NULL DEFAULT '',
   width INTEGER,
   height INTEGER,
   favorite INTEGER NOT NULL DEFAULT 0,
@@ -153,6 +162,20 @@ CREATE TABLE IF NOT EXISTS settings (
   k TEXT PRIMARY KEY,
   v TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS prompts (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT 'custom',
+  text TEXT NOT NULL,
+  negative TEXT NOT NULL DEFAULT '',
+  tags TEXT NOT NULL DEFAULT '',
+  favorite INTEGER NOT NULL DEFAULT 0,
+  builtin INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_prompts_category ON prompts(category, favorite, created_at DESC);
 """
 
 
@@ -187,9 +210,13 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
 
 
 def _backup_v1(conn: sqlite3.Connection, source: Path) -> None:
+    _backup_copy(conn, source, ".v1.bak")
+
+
+def _backup_copy(conn: sqlite3.Connection, source: Path, suffix: str) -> None:
     if not source.exists():
         return
-    target = source.with_name(source.name + ".v1.bak")
+    target = source.with_name(source.name + suffix)
     if target.exists():
         return
     conn.commit()
@@ -331,6 +358,62 @@ def _migrate_jobs_v5(conn: sqlite3.Connection) -> None:
             conn.execute("UPDATE jobs SET channel_name = ? WHERE id = ?", (cname, r["id"]))
 
 
+def _migrate_v6(conn: sqlite3.Connection, source: Path | None = None) -> None:
+    """v6 adds reference variants/depth, asset lineage and the prompt library."""
+
+    asset_columns = set(_table_columns(conn, "assets"))
+    library_columns = set(_table_columns(conn, "library_items"))
+    asset_fields = {"parent_id", "root_id", "tool", "version"}
+    library_fields = {"group_key", "variant_label", "depth_path", "depth_thumb_path", "has_depth"}
+    if asset_fields <= asset_columns and library_fields <= library_columns:
+        return
+
+    _backup_copy(conn, source or config.DB_PATH, ".v5.bak")
+    for column, ddl in (
+        ("parent_id", "ALTER TABLE assets ADD COLUMN parent_id TEXT"),
+        ("root_id", "ALTER TABLE assets ADD COLUMN root_id TEXT"),
+        ("tool", "ALTER TABLE assets ADD COLUMN tool TEXT NOT NULL DEFAULT ''"),
+        ("version", "ALTER TABLE assets ADD COLUMN version INTEGER NOT NULL DEFAULT 1"),
+    ):
+        if column not in asset_columns:
+            conn.execute(ddl)
+    for column, ddl in (
+        ("group_key", "ALTER TABLE library_items ADD COLUMN group_key TEXT NOT NULL DEFAULT ''"),
+        ("variant_label", "ALTER TABLE library_items ADD COLUMN variant_label TEXT NOT NULL DEFAULT ''"),
+        ("depth_path", "ALTER TABLE library_items ADD COLUMN depth_path TEXT"),
+        ("depth_thumb_path", "ALTER TABLE library_items ADD COLUMN depth_thumb_path TEXT"),
+        ("has_depth", "ALTER TABLE library_items ADD COLUMN has_depth INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if column not in library_columns:
+            conn.execute(ddl)
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_root ON assets(root_id, version)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_parent ON assets(parent_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_library_group ON library_items(group_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_library_depth ON library_items(has_depth, kind)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS prompts (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          category TEXT NOT NULL DEFAULT 'custom',
+          text TEXT NOT NULL,
+          negative TEXT NOT NULL DEFAULT '',
+          tags TEXT NOT NULL DEFAULT '',
+          favorite INTEGER NOT NULL DEFAULT 0,
+          builtin INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_prompts_category ON prompts(category, favorite, created_at DESC)"
+    )
+    conn.execute("UPDATE assets SET root_id = id WHERE root_id IS NULL OR root_id = ''")
+    conn.execute("UPDATE assets SET version = 1 WHERE version IS NULL OR version < 1")
+
+
 def init_db() -> None:
     config.ensure_dirs()
     with connect() as conn:
@@ -342,9 +425,14 @@ def init_db() -> None:
         _migrate_models_v2(conn)
         _migrate_library_v3(conn)
         _migrate_jobs_v5(conn)
+        _migrate_v6(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_models_channel ON models(channel_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_root ON assets(root_id, version)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_parent ON assets(parent_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_library_group ON library_items(group_key)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_library_depth ON library_items(has_depth, kind)")
         conn.execute(
-            "INSERT INTO app_meta(k, v) VALUES ('schema_version', '5') "
+            "INSERT INTO app_meta(k, v) VALUES ('schema_version', '6') "
             "ON CONFLICT(k) DO UPDATE SET v = excluded.v"
         )
 

@@ -9,6 +9,26 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+
+def _normalize_no_proxy() -> None:
+    """httpx 0.28 misparses bracketed IPv6 entries in NO_PROXY; unbrace them."""
+
+    for key in ("NO_PROXY", "no_proxy"):
+        raw = os.environ.get(key)
+        if not raw:
+            continue
+        parts: list[str] = []
+        for item in raw.split(","):
+            token = item.strip()
+            if token.startswith("[") and token.endswith("]"):
+                token = token[1:-1]
+            if token:
+                parts.append(token)
+        os.environ[key] = ",".join(parts)
+
+
+_normalize_no_proxy()
+
 BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.environ.get("ONEFRAME_DATA", BASE_DIR / "data")).resolve()
 MEDIA_DIR = DATA_DIR / "media"
@@ -29,6 +49,10 @@ VIDEO_WORKERS = int(os.environ.get("ONEFRAME_VIDEO_WORKERS", "2"))
 # Upload limits (bytes).
 MAX_UPLOAD_BYTES = int(os.environ.get("ONEFRAME_MAX_UPLOAD", str(25 * 1024 * 1024)))
 MAX_ASSET_BYTES = int(os.environ.get("ONEFRAME_MAX_ASSET", str(512 * 1024 * 1024)))
+MAX_MASK_BYTES = int(os.environ.get("ONEFRAME_MAX_MASK", str(8 * 1024 * 1024)))
+MAX_ZIP_BYTES = int(os.environ.get("ONEFRAME_MAX_ZIP", str(100 * 1024 * 1024)))
+MAX_URL_BYTES = int(os.environ.get("ONEFRAME_MAX_URL", str(25 * 1024 * 1024)))
+MAX_SPLIT_CELLS = 16
 
 # Library indexing may only read below these roots (plus DATA_DIR).
 LIBRARY_ROOTS = [

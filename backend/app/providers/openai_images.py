@@ -53,6 +53,7 @@ class OpenAIImagesAdapter(Adapter):
     label = "OpenAI Images 兼容"
     modalities = {"image"}
     supports_reference = True
+    supports_mask = True
     param_keys = ("size", "quality", "background", "style", "seed", "response_format")
     about = (
         "标准 /v1/images/generations 与 /v1/images/edits（multipart）。适合 OpenAI 官方"
@@ -71,25 +72,34 @@ class OpenAIImagesAdapter(Adapter):
             raise Unsupported("单次最多生成 16 张")
         if len(req.refs) > 16:
             raise Unsupported("参考图最多 16 张")
+        if req.mask:
+            if len(req.refs) != 1:
+                raise Unsupported("局部重绘需要且只需要一张源图")
+            if req.count != 1:
+                raise Unsupported("局部重绘每次只能生成一张")
 
     async def submit(self, ctx: ProviderContext) -> SubmitResult:
         req = ctx.request
         params = req.params
         headers = {"Authorization": f"Bearer {ctx.api_key}", **ctx.headers}
         response_format = self._response_format(ctx)
-        size = params.get("size") or image_size(
-            str(params.get("aspect_ratio") or "1:1"),
-            str(params.get("resolution") or "1K"),
+        size = params.get("size") or (
+            "" if req.mask else image_size(
+                str(params.get("aspect_ratio") or "1:1"),
+                str(params.get("resolution") or "1K"),
+            )
         )
         quality = params.get("quality") or ""
 
-        if req.refs:
+        if req.refs or req.mask:
             files: list[tuple[str, tuple[str, bytes, str]]] = []
             for index, ref in enumerate(req.refs):
                 if not ref.data:
                     raise ProviderError("参考图内容为空", kind="params", retryable=False)
                 field = "image[]" if len(req.refs) > 1 else "image"
                 files.append((field, (f"ref-{index}.png", ref.data, ref.mime or "image/png")))
+            if req.mask and req.mask.data:
+                files.append(("mask", ("mask.png", req.mask.data, "image/png")))
             form: dict[str, str] = {"model": req.model, "prompt": req.prompt}
             if req.negative:
                 form["negative_prompt"] = req.negative

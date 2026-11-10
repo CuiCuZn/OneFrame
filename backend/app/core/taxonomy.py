@@ -17,7 +17,7 @@ from dataclasses import dataclass, field as dc_field
 from typing import Any, Iterable, Mapping, Sequence
 
 #: Bumped whenever the rules change; ``ensure_taxonomy`` rebuilds older rows.
-TAXONOMY_VERSION = "6"
+TAXONOMY_VERSION = "7"
 
 KIND_LABEL = {
     "pose": "姿势",
@@ -33,7 +33,7 @@ KIND_LABEL = {
 #: category shown on cards, level 3+ are optional facets (angle, colour, ...).
 FIELDS: dict[str, tuple[tuple[str, int], ...]] = {
     "pose": (("构图", 1), ("姿势分类", 2), ("角度", 3)),
-    "costume": (("风格", 1), ("主类", 2), ("品类", 3), ("颜色", 3), ("单品", 3)),
+    "costume": (("风格", 1), ("主类", 2), ("品类", 3), ("颜色", 3), ("单品", 3), ("视角", 3)),
     "portrait": (("分区", 1), ("发长", 2), ("发型", 3)),
 }
 GENERIC_FIELDS: tuple[tuple[str, int], ...] = (("目录", 1), ("目录", 2))
@@ -203,6 +203,7 @@ def classify_costume(entry: Mapping[str, Any]) -> Classification:
     labels = [clean(label) for label in (entry.get("标签") or []) if clean(label)]
     keywords = clean(entry.get("关键词"))
     ident = clean(entry.get("id"))
+    view = clean(entry.get("视角") or entry.get("view_label") or entry.get("selectedView"))
 
     types = garment_types(name, labels)
     colors = _colors(labels, name)
@@ -211,14 +212,16 @@ def classify_costume(entry: Mapping[str, Any]) -> Classification:
     facets += [("品类", item, 3) for item in types]
     facets += [("颜色", color, 3) for color in colors]
     facets += [("单品", label, 3) for label in labels]
+    if view:
+        facets.append(("视角", view, 3))
 
     category = primary or style
     return _finalize(
         category=category,
         category_path=_path(style, primary) if primary else style,
         facets=facets,
-        search_parts=(name, style, *types, *labels, *colors, keywords, ident),
-        tags=("服装", style, *types, *colors),
+        search_parts=(name, style, *types, *labels, *colors, keywords, ident, view),
+        tags=("服装", style, *types, *colors, view),
         nsfw=style in NSFW_COSTUME_STYLES,
     )
 

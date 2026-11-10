@@ -44,6 +44,7 @@ const FEATURES = [
   { id: "seed", label: "随机种子" },
   { id: "negative", label: "反向提示词" },
   { id: "img2img", label: "图生图" },
+  { id: "inpaint", label: "局部重绘" },
 ];
 
 const EMPTY_MODEL: ModelPayload = {

@@ -215,6 +215,54 @@ def save_upload(filename: str, data: bytes, mime: str | None = None) -> dict[str
     return record
 
 
+def save_mask(data: bytes, job_id: str) -> str:
+    folder = config.UPLOAD_DIR / "masks"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{job_id}.png"
+    path.write_bytes(data)
+    return path.relative_to(config.DATA_DIR).as_posix()
+
+
+def _load_png(source: Path) -> Image.Image:
+    with Image.open(source) as image:
+        image = ImageOps.exif_transpose(image).convert("RGBA")
+        if image.width * image.height > 40_000_000 or max(image.size) > 8192:
+            raise ValueError("图片超过 4000 万像素或单边 8192 像素")
+        return image.copy()
+
+
+def split_image(
+    source: Path, rows: int, columns: int, cells: list[int]
+) -> list[tuple[int, bytes]]:
+    image = _load_png(source)
+    width, height = image.size
+    if width < columns or height < rows:
+        raise ValueError("图片尺寸不足以拆分成所选行列")
+    result: list[tuple[int, bytes]] = []
+    for index in cells:
+        row, column = divmod(index, columns)
+        left = column * width // columns
+        right = (column + 1) * width // columns
+        top = row * height // rows
+        bottom = (row + 1) * height // rows
+        crop = image.crop((left, top, right, bottom))
+        buffer = io.BytesIO()
+        crop.save(buffer, "PNG")
+        result.append((index, buffer.getvalue()))
+    return result
+
+
+def upscale_image(source: Path, factor: int) -> tuple[bytes, int, int]:
+    image = _load_png(source)
+    width, height = image.width * factor, image.height * factor
+    if width * height > 64_000_000 or max(width, height) > 8192:
+        raise ValueError("放大后超过 6400 万像素或单边 8192 像素")
+    resized = image.resize((width, height), Image.LANCZOS)
+    buffer = io.BytesIO()
+    resized.save(buffer, "PNG")
+    return buffer.getvalue(), width, height
+
+
 def resolve_media(rel_path: str) -> Path | None:
     """Return an absolute path only when it stays below DATA_DIR."""
     if not rel_path:

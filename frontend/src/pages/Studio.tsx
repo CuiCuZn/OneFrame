@@ -1,23 +1,36 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Archive,
   ArrowRight,
+  BookOpen,
+  Brush,
   Check,
   ChevronDown,
   Clipboard,
   Clapperboard,
   Clock,
+  Combine,
   Download,
   Expand,
+  GitCompare,
+  Grid2X2,
   ImagePlus,
   Images,
+  Link2,
   Loader2,
+  Lock,
+  Maximize2,
   Palette,
   Plus,
   RotateCcw,
+  Shirt,
+  Shuffle,
   Sparkles,
   Star,
   Trash2,
+  Unlock,
   Upload,
+  UserRound,
   Wand2,
   X,
 } from "lucide-react";
@@ -42,6 +55,17 @@ import type {
   Model,
   RefInput,
 } from "../lib/types";
+import CompareModal, { type CompareSource } from "../components/CompareModal";
+import CompositeRefModal from "../components/CompositeRefModal";
+import CostumeExtractModal from "../components/CostumeExtractModal";
+import CharacterToolsModal from "../components/CharacterToolsModal";
+import GridSplitModal from "../components/GridSplitModal";
+import InpaintModal from "../components/InpaintModal";
+import MatrixModal from "../components/MatrixModal";
+import PromptLibraryDrawer from "../components/PromptLibraryDrawer";
+import EnhanceModal from "../components/EnhanceModal";
+import RefineModal from "../components/RefineModal";
+import VersionStrip from "../components/VersionStrip";
 import { Badge, Button, EmptyState, IconButton, Modal, Segmented, Toggle } from "../components/ui";
 
 interface Props {
@@ -55,6 +79,8 @@ interface RefSlot {
   thumb: string;
   asset_id?: string;
   library_id?: string;
+  variant?: "base" | "depth";
+  group_key?: string;
 }
 
 const ROLE_ORDER = ["character", "costume", "pose", "style", "reference"];
@@ -92,6 +118,26 @@ export default function Studio({ onGoModels }: Props) {
   const [recent, setRecent] = useState<Asset[]>([]);
   const [lightbox, setLightbox] = useState<JobAsset | Asset | null>(null);
   const [refPreview, setRefPreview] = useState<RefSlot | null>(null);
+  const [compare, setCompare] = useState<{
+    left: CompareSource;
+    right: CompareSource;
+    alternatives?: CompareSource[];
+    mode: "fidelity" | "selection";
+  } | null>(null);
+  const [urlOpen, setUrlOpen] = useState(false);
+  const [urlValue, setUrlValue] = useState("");
+  const [urlBusy, setUrlBusy] = useState(false);
+  const [costumeOpen, setCostumeOpen] = useState(false);
+  const [compositeOpen, setCompositeOpen] = useState(false);
+  const [locks, setLocks] = useState<Record<string, boolean>>({});
+  const [randomBusy, setRandomBusy] = useState(false);
+  const [matrixOpen, setMatrixOpen] = useState(false);
+  const [inpaintAsset, setInpaintAsset] = useState<JobAsset | Asset | null>(null);
+  const [refineAsset, setRefineAsset] = useState<JobAsset | Asset | null>(null);
+  const [splitAsset, setSplitAsset] = useState<JobAsset | Asset | null>(null);
+  const [characterAsset, setCharacterAsset] = useState<JobAsset | Asset | null>(null);
+  const [promptLibraryOpen, setPromptLibraryOpen] = useState(false);
+  const [enhanceOpen, setEnhanceOpen] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const restoredJobs = useRef(false);
@@ -160,19 +206,26 @@ export default function Studio({ onGoModels }: Props) {
     if (!raw) return;
     window.localStorage.removeItem("of.pendingRef");
     try {
-      const parsed = JSON.parse(raw) as { item?: LibraryItem; role?: string } | LibraryItem;
+      const parsed = JSON.parse(raw) as { item?: LibraryItem; role?: string; variant?: string } | LibraryItem;
       const item = "item" in parsed && parsed.item ? parsed.item : (parsed as LibraryItem);
       const role = ("role" in parsed && parsed.role) || "reference";
+      const variant: "base" | "depth" =
+        "variant" in parsed && parsed.variant === "depth" ? "depth" : "base";
       setRefs((current) => {
-        if (current.some((ref) => ref.library_id === item.id)) return current;
+        if (current.some((ref) => ref.library_id === item.id && (ref.variant ?? "base") === variant)) return current;
         const next = [
           ...current.filter((ref) => ref.role !== role),
           {
-            key: `lib-${item.id}`,
+            key: `lib-${item.id}-${variant}`,
             role,
             name: item.title || item.category || "参考素材",
-            thumb: item.thumb_url,
+            thumb:
+              variant === "depth" && item.depth_thumb_url
+                ? item.depth_thumb_url
+                : item.thumb_url,
             library_id: item.id,
+            variant,
+            group_key: item.group_key,
           },
         ];
         return next.slice(-6);
@@ -388,21 +441,216 @@ export default function Studio({ onGoModels }: Props) {
     );
   };
 
-  const uploadRefs = async (files: FileList | null) => {
+  const uploadFiles = useCallback(
+    async (files: File[]) => {
+      if (!files.length) return;
+      try {
+        const data = await api.assets.upload(files.slice(0, 4));
+        const added: RefSlot[] = data.items.map((asset) => ({
+          key: `asset-${asset.id}`,
+          role: "reference",
+          name: "上传参考",
+          thumb: asset.thumb_url,
+          asset_id: asset.id,
+        }));
+        setRefs((current) => [...current, ...added].slice(-6));
+        toast(`已上传 ${added.length} 张参考图`, "success");
+      } catch (error) {
+        toast(error instanceof ApiError ? error.message : "上传失败", "error");
+      }
+    },
+    [setRefs, toast],
+  );
+
+  const uploadRefs = (files: FileList | null) => {
     if (!files?.length) return;
-    try {
-      const data = await api.assets.upload(Array.from(files).slice(0, 4));
-      const added: RefSlot[] = data.items.map((asset) => ({
+    void uploadFiles(Array.from(files).slice(0, 4));
+  };
+
+  useEffect(() => {
+    const handlePaste = (event: ClipboardEvent) => {
+      const files = Array.from(event.clipboardData?.items ?? [])
+        .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => Boolean(file));
+      if (!files.length) return;
+      event.preventDefault();
+      void uploadFiles(files.slice(0, 4));
+    };
+    window.addEventListener("paste", handlePaste);
+    return () => window.removeEventListener("paste", handlePaste);
+  }, [uploadFiles]);
+
+  const addAssetRef = (asset: Asset) => {
+    setRefs((current) =>
+      [
+        ...current,
+        {
+          key: `asset-${asset.id}`,
+          role: "reference",
+          name: asset.prompt ? asset.prompt.slice(0, 40) : "参考图",
+          thumb: asset.thumb_url,
+          asset_id: asset.id,
+        },
+      ].slice(-6),
+    );
+  };
+
+  const addExtractedCostume = (asset: Pick<Asset, "id" | "thumb_url" | "url" | "prompt">) => {
+    setRefs((current) =>
+      [
+        ...current.filter((ref) => ref.role !== "costume"),
+        {
+          key: `asset-${asset.id}`,
+          role: "costume",
+          name: "提取服饰",
+          thumb: asset.thumb_url,
+          asset_id: asset.id,
+        },
+      ].slice(-6),
+    );
+    toast("已作为服装参考加入", "success");
+  };
+
+  const addComposite = (asset: Pick<Asset, "id" | "thumb_url" | "url" | "prompt">) => {
+    setRefs((current) => {
+      const entry: RefSlot = {
         key: `asset-${asset.id}`,
         role: "reference",
-        name: "上传参考",
+        name: "参考拼图",
         thumb: asset.thumb_url,
         asset_id: asset.id,
-      }));
-      setRefs((current) => [...current, ...added].slice(-6));
-      toast(`已上传 ${added.length} 张参考图`, "success");
+      };
+      if ((model?.caps.max_refs ?? 1) <= 1) return [entry];
+      return [...current, entry].slice(-6);
+    });
+  };
+
+  const randomizeRefs = async () => {
+    setRandomBusy(true);
+    try {
+      const targets = [
+        { kind: "pose", role: "pose" },
+        { kind: "costume", role: "costume" },
+        { kind: "portrait", role: "character" },
+      ];
+      let next = [...refs];
+      for (const target of targets) {
+        if (locks[target.role]) continue;
+        const item = await api.library.random({ kind: target.kind });
+        next = [
+          ...next.filter((ref) => ref.role !== target.role),
+          {
+            key: `lib-${item.id}-base`,
+            role: target.role,
+            name: item.title || item.category || "随机素材",
+            thumb: item.thumb_url,
+            library_id: item.id,
+            variant: "base" as const,
+            group_key: item.group_key,
+          },
+        ];
+      }
+      setRefs(next.slice(-6));
+      toast("已随机搭配，锁定的槽位保持不变", "success");
     } catch (error) {
-      toast(error instanceof ApiError ? error.message : "上传失败", "error");
+      toast(error instanceof ApiError ? error.message : "随机搭配失败", "error");
+    } finally {
+      setRandomBusy(false);
+    }
+  };
+
+  const changePose = async (asset: JobAsset | Asset) => {
+    try {
+      const data = await api.assets.refs(asset.id);
+      const pose = data.items.find((item) => item.role === "pose" && item.source === "library");
+      let picked: LibraryItem | null = null;
+      if (pose) {
+        const variants = await api.library.variants(pose.id);
+        picked = variants.items.find((item) => item.id !== pose.id) ?? null;
+      }
+      if (!picked) {
+        picked = await api.library.random({ kind: "pose", exclude: pose ? [pose.id] : [] });
+      }
+      if (!picked) {
+        toast("没有找到可替换的姿势", "error");
+        return;
+      }
+      setRefs((current) =>
+        [
+          ...current.filter((ref) => ref.role !== "pose"),
+          {
+            key: `lib-${picked!.id}-base`,
+            role: "pose",
+            name: picked!.title || picked!.category || "随机姿势",
+            thumb: picked!.thumb_url,
+            library_id: picked!.id,
+            variant: "base" as const,
+            group_key: picked!.group_key,
+          },
+        ].slice(-6),
+      );
+      toast("已换一个姿势，其他参考和参数保持不变", "success");
+    } catch (error) {
+      toast(error instanceof ApiError ? error.message : "换姿势失败", "error");
+    }
+  };
+
+  const upscaleAsset = async (asset: JobAsset | Asset) => {
+    if (!window.confirm("本地放大只提升分辨率，不会补充 AI 细节。继续放大 2 倍？")) return;
+    try {
+      const result = await api.assets.upscale(asset.id, 2);
+      setLightbox(result);
+      toast("已生成 2x 放大版本", "success");
+    } catch (error) {
+      toast(error instanceof ApiError ? error.message : "放大失败", "error");
+    }
+  };
+
+  const importUrl = async () => {
+    const value = urlValue.trim();
+    if (!value) return toast("先填写图片地址", "error");
+    setUrlBusy(true);
+    try {
+      const asset = await api.assets.importUrl(value);
+      addAssetRef(asset);
+      setUrlOpen(false);
+      setUrlValue("");
+      toast("已从 URL 添加参考图", "success");
+    } catch (error) {
+      toast(error instanceof ApiError ? error.message : "导入失败", "error");
+    } finally {
+      setUrlBusy(false);
+    }
+  };
+
+  const compareAsset = async (asset: JobAsset | Asset) => {
+    if (asset.kind !== "image") {
+      toast("视频暂不支持对比", "error");
+      return;
+    }
+    try {
+      const data = await api.assets.refs(asset.id);
+      const refs = data.items
+        .filter((item) => !item.missing)
+        .map((item) => ({
+          url: item.url,
+          label: `参考 · ${item.name || item.role}`,
+          kind: "reference" as const,
+          missing: item.missing,
+        }));
+      if (!refs.length) {
+        toast("这条结果没有可用的参考图", "error");
+        return;
+      }
+      setCompare({
+        left: { url: asset.url, label: "生成结果", kind: "generated" },
+        right: refs[0],
+        alternatives: refs,
+        mode: "fidelity",
+      });
+    } catch (error) {
+      toast(error instanceof ApiError ? error.message : "读取参考图失败", "error");
     }
   };
 
@@ -450,6 +698,7 @@ export default function Studio({ onGoModels }: Props) {
         name: ref.name,
         ...(ref.asset_id ? { asset_id: ref.asset_id } : {}),
         ...(ref.library_id ? { library_id: ref.library_id } : {}),
+        ...(ref.variant && ref.variant !== "base" ? { variant: ref.variant } : {}),
       }));
       const result = await api.generate({
         model_id: model.id,
@@ -633,6 +882,46 @@ export default function Studio({ onGoModels }: Props) {
                     </Button>
                     <Button
                       size="sm"
+                      variant="outline"
+                      icon={<Link2 size={13} />}
+                      onClick={() => setUrlOpen(true)}
+                      title="从图片 URL 添加参考"
+                    >
+                      URL
+                    </Button>
+                    {modality === "image" && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        icon={<Shirt size={13} />}
+                        onClick={() => setCostumeOpen(true)}
+                        title="从穿搭照片提取服装单品"
+                      >
+                        提取服饰
+                      </Button>
+                    )}
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      icon={<Combine size={13} />}
+                      onClick={() => setCompositeOpen(true)}
+                      disabled={refs.length < 2}
+                      title="把多张参考合成一张"
+                    >
+                      合成参考
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      icon={<Shuffle size={13} />}
+                      onClick={() => void randomizeRefs()}
+                      loading={randomBusy}
+                      title="随机搭配姿势、服装、人像；锁定的槽位不变"
+                    >
+                      随机搭配
+                    </Button>
+                    <Button
+                      size="sm"
                       variant="ghost"
                       icon={<Wand2 size={13} />}
                       onClick={() => void compilePrompt()}
@@ -688,6 +977,16 @@ export default function Studio({ onGoModels }: Props) {
                           </div>
                           <button
                             type="button"
+                            className={`ref-lock ${locks[ref.role] ? "is-on" : ""}`}
+                            onClick={() =>
+                              setLocks((current) => ({ ...current, [ref.role]: !current[ref.role] }))
+                            }
+                            title={locks[ref.role] ? "解锁槽位" : "锁定槽位（随机搭配时不变）"}
+                          >
+                            {locks[ref.role] ? <Lock size={11} /> : <Unlock size={11} />}
+                          </button>
+                          <button
+                            type="button"
                             className="composer-ref-remove"
                             onClick={() => removeRef(ref.key)}
                             title="移除"
@@ -741,6 +1040,26 @@ export default function Studio({ onGoModels }: Props) {
               }}
               rows={3}
             />
+
+            <div className="prompt-toolbar">
+              <Button
+                size="sm"
+                variant="ghost"
+                icon={<BookOpen size={13} />}
+                onClick={() => setPromptLibraryOpen(true)}
+              >
+                提示词库
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                icon={<Sparkles size={13} />}
+                onClick={() => setEnhanceOpen(true)}
+                disabled={!prompt.trim()}
+              >
+                增强
+              </Button>
+            </div>
 
             {showNegative && negativeOpen && (
               <div className="negative-row">
@@ -932,6 +1251,18 @@ export default function Studio({ onGoModels }: Props) {
                 <span className="cost">
                   预计 <strong>{estimate.text}</strong>
                 </span>
+                {modality === "image" && (
+                  <Button
+                    variant="soft"
+                    size="lg"
+                    icon={<GitCompare size={16} />}
+                    disabled={!prompt.trim()}
+                    onClick={() => setMatrixOpen(true)}
+                    title="同一提示词发给多个模型，结果分列对比"
+                  >
+                    对比生成
+                  </Button>
+                )}
                 <Button
                   variant="primary"
                   size="lg"
@@ -1033,17 +1364,22 @@ export default function Studio({ onGoModels }: Props) {
         onClose={() => setPickerOpen(false)}
         role={pickerRole}
         onRole={setPickerRole}
-        onPick={(item) => {
+        onPick={(item, variant) => {
           const autoRole = (item.kind && ROLE_ORDER.includes(item.kind)) ? item.kind : pickerRole;
           addRef({
-            key: `lib-${item.id}`,
+            key: `lib-${item.id}-${variant ?? "base"}`,
             role: autoRole,
             name: item.title || item.category || "参考素材",
-            thumb: item.thumb_url,
+            thumb:
+              variant === "depth" && item.depth_thumb_url
+                ? item.depth_thumb_url
+                : item.thumb_url,
             library_id: item.id,
+            variant: variant ?? "base",
+            group_key: item.group_key,
           });
           setPickerOpen(false);
-          toast("已加入参考图", "success");
+          toast(variant === "depth" ? "已加入深度图参考" : "已加入参考图", "success");
         }}
       />
 
@@ -1087,7 +1423,138 @@ export default function Studio({ onGoModels }: Props) {
         </div>
       )}
 
-      <Lightbox asset={lightbox} onClose={() => setLightbox(null)} />
+      <Lightbox
+        asset={lightbox}
+        onClose={() => setLightbox(null)}
+        onCompare={(asset) => void compareAsset(asset)}
+        onChangePose={(asset) => void changePose(asset)}
+        onTool={(tool, asset) => {
+          if (tool === "inpaint") setInpaintAsset(asset);
+          else if (tool === "refine") setRefineAsset(asset);
+          else if (tool === "split") setSplitAsset(asset);
+          else setCharacterAsset(asset);
+        }}
+        onUpscale={(asset) => void upscaleAsset(asset)}
+        onVersionSelect={(asset) => setLightbox(asset)}
+        onVersionCompare={(asset) => {
+          if (!lightbox) return;
+          setCompare({
+            left: { url: asset.url, label: `v${asset.version}`, kind: "asset" },
+            right: { url: lightbox.url, label: "当前版本", kind: "asset" },
+            mode: "selection",
+          });
+        }}
+      />
+
+      <InpaintModal open={Boolean(inpaintAsset)} asset={inpaintAsset} onClose={() => setInpaintAsset(null)} />
+      <RefineModal open={Boolean(refineAsset)} asset={refineAsset} onClose={() => setRefineAsset(null)} />
+      <GridSplitModal
+        open={Boolean(splitAsset)}
+        asset={splitAsset}
+        onClose={() => setSplitAsset(null)}
+      />
+      <CharacterToolsModal
+        open={Boolean(characterAsset)}
+        asset={characterAsset}
+        onClose={() => setCharacterAsset(null)}
+      />
+
+      <PromptLibraryDrawer
+        open={promptLibraryOpen}
+        onClose={() => setPromptLibraryOpen(false)}
+        currentPrompt={prompt}
+        onInsert={(text) => {
+          setPrompt((current) => (current.trim() ? `${current}\n${text}` : text));
+          setPromptLibraryOpen(false);
+        }}
+      />
+
+      <EnhanceModal
+        open={enhanceOpen}
+        onClose={() => setEnhanceOpen(false)}
+        prompt={prompt}
+        negative={negative}
+        style={style}
+        modality={modality}
+        hasRefs={refs.length > 0}
+        onApply={(nextPrompt, nextNegative) => {
+          setPrompt(nextPrompt);
+          if (showNegative && nextNegative) setNegative(nextNegative);
+        }}
+      />
+
+      <Modal
+        open={urlOpen}
+        title="从 URL 添加参考"
+        subtitle="只支持 http/https 图片，单张不超过 25MB；内网地址会被拒绝"
+        onClose={() => setUrlOpen(false)}
+        width={520}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setUrlOpen(false)}>
+              取消
+            </Button>
+            <Button variant="primary" loading={urlBusy} onClick={() => void importUrl()}>
+              添加
+            </Button>
+          </>
+        }
+      >
+        <input
+          className="input"
+          value={urlValue}
+          onChange={(event) => setUrlValue(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") void importUrl();
+          }}
+          placeholder="https://example.com/reference.png"
+          autoFocus
+        />
+      </Modal>
+
+      <CompositeRefModal
+        open={compositeOpen}
+        sources={refs.map((ref) => ({
+          role: ref.role,
+          label: slots.find((slot) => slot.id === ref.role)?.name ?? ref.role,
+          url: refFullUrl(ref),
+        }))}
+        onClose={() => setCompositeOpen(false)}
+        onUse={addComposite}
+      />
+
+      <MatrixModal
+        open={matrixOpen}
+        onClose={() => setMatrixOpen(false)}
+        base={{
+          prompt: prompt.trim(),
+          negative: showNegative ? negative.trim() : "",
+          params,
+          refs: refs.map((ref) => ({
+            role: ref.role,
+            name: ref.name,
+            ...(ref.asset_id ? { asset_id: ref.asset_id } : {}),
+            ...(ref.library_id ? { library_id: ref.library_id } : {}),
+            ...(ref.variant && ref.variant !== "base" ? { variant: ref.variant } : {}),
+          })),
+          style,
+        }}
+      />
+
+      <CostumeExtractModal
+        open={costumeOpen}
+        onClose={() => setCostumeOpen(false)}
+        onUse={addExtractedCostume}
+      />
+
+      <CompareModal
+        open={Boolean(compare)}
+        onClose={() => setCompare(null)}
+        left={compare?.left ?? null}
+        right={compare?.right ?? null}
+        alternatives={compare?.alternatives}
+        initialMode={compare?.mode === "fidelity" ? "overlay" : "side"}
+      />
     </div>
   );
 }
@@ -1277,7 +1744,7 @@ function RefPicker({
   onClose: () => void;
   role?: string;
   onRole?: (role: string) => void;
-  onPick: (item: LibraryItem) => void;
+  onPick: (item: LibraryItem, variant?: "base" | "depth") => void;
 }) {
   const { toast } = useStore();
   const [items, setItems] = useState<LibraryItem[]>([]);
@@ -1445,10 +1912,23 @@ function RefPicker({
             className={`picker-grid ${loading ? "is-loading" : ""}`}
           >
             {items.map((item) => (
-              <button key={item.id} className="picker-item" onClick={() => onPick(item)}>
-                <img src={item.thumb_url} alt="" loading="lazy" />
-                <span>{item.title || item.category_path || item.category}</span>
-              </button>
+              <div className="picker-item-wrap" key={item.id}>
+                <button className="picker-item" onClick={() => onPick(item)}>
+                  <img src={item.thumb_url} alt="" loading="lazy" />
+                  {Boolean(item.has_depth) && <span className="picker-depth-badge">深度</span>}
+                  <span>{item.title || item.category_path || item.category}</span>
+                </button>
+                {Boolean(item.has_depth) && (
+                  <button
+                    type="button"
+                    className="picker-depth-use"
+                    title="以深度图作为参考"
+                    onClick={() => onPick(item, "depth")}
+                  >
+                    用深度图
+                  </button>
+                )}
+              </div>
             ))}
           </div>
         )}
@@ -1463,7 +1943,25 @@ function RefPicker({
   );
 }
 
-function Lightbox({ asset, onClose }: { asset: JobAsset | Asset | null; onClose: () => void }) {
+function Lightbox({
+  asset,
+  onClose,
+  onCompare,
+  onChangePose,
+  onTool,
+  onUpscale,
+  onVersionSelect,
+  onVersionCompare,
+}: {
+  asset: JobAsset | Asset | null;
+  onClose: () => void;
+  onCompare: (asset: JobAsset | Asset) => void;
+  onChangePose: (asset: JobAsset | Asset) => void;
+  onTool: (tool: "inpaint" | "refine" | "split" | "character", asset: JobAsset | Asset) => void;
+  onUpscale: (asset: JobAsset | Asset) => void;
+  onVersionSelect: (asset: Asset) => void;
+  onVersionCompare: (asset: Asset) => void;
+}) {
   const { copied, copy } = useCopy();
   if (!asset) return null;
   const prompt = (asset as Asset).prompt;
@@ -1555,6 +2053,48 @@ function Lightbox({ asset, onClose }: { asset: JobAsset | Asset | null; onClose:
           >
             <Wand2 size={15} /> 复用参数
           </button>
+          {asset.kind === "image" && (
+            <button className="btn btn-ghost" onClick={() => onCompare(asset)}>
+              <GitCompare size={15} /> 对比参考
+            </button>
+          )}
+          {asset.kind === "image" && (
+            <button className="btn btn-ghost" onClick={() => onChangePose(asset)}>
+              <Shuffle size={15} /> 换个姿势
+            </button>
+          )}
+          {asset.kind === "image" && (
+            <a className="btn btn-ghost" href={api.assets.referenceZipUrl(asset.id)}>
+              <Archive size={15} /> 参考图 ZIP
+            </a>
+          )}
+          {asset.kind === "image" && (
+            <>
+              <button className="btn btn-soft" onClick={() => onTool("inpaint", asset)}>
+                <Brush size={15} /> 局部重绘
+              </button>
+              <button className="btn btn-soft" onClick={() => onTool("refine", asset)}>
+                <Sparkles size={15} /> 精修
+              </button>
+              <button className="btn btn-ghost" onClick={() => onUpscale(asset)}>
+                <Maximize2 size={15} /> 本地放大 2x
+              </button>
+              <button className="btn btn-ghost" onClick={() => onTool("split", asset)}>
+                <Grid2X2 size={15} /> 宫格拆分
+              </button>
+              <button className="btn btn-ghost" onClick={() => onTool("character", asset)}>
+                <UserRound size={15} /> 角色工具
+              </button>
+            </>
+          )}
+          {asset.kind === "image" && (
+            <VersionStrip
+              assetId={asset.id}
+              currentId={asset.id}
+              onSelect={onVersionSelect}
+              onCompare={onVersionCompare}
+            />
+          )}
         </div>
       </aside>
     </div>

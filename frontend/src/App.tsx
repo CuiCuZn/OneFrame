@@ -8,6 +8,7 @@ import {
   History,
   Images,
   LayoutGrid,
+  ListTodo,
   Moon,
   Settings2,
   Sparkles,
@@ -18,6 +19,7 @@ import { ROUTES, useHashRoute } from "./lib/hooks";
 import { useStore } from "./lib/store";
 import { api } from "./lib/api";
 import { Button, IconButton, ToastHost } from "./components/ui";
+import TaskCenter from "./components/TaskCenter";
 import Studio from "./pages/Studio";
 import Models from "./pages/Models";
 import Library from "./pages/Library";
@@ -40,6 +42,7 @@ export default function App() {
   const [route, navigate] = useHashRoute();
   const { loading, error, models, channels, refresh, resolvedTheme, setTheme } = useStore();
   const [active, setActive] = useState(0);
+  const [taskOpen, setTaskOpen] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -129,6 +132,14 @@ export default function App() {
             >
               {resolvedTheme === "light" ? <Moon size={16} /> : <Sun size={16} />}
             </IconButton>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<ListTodo size={15} />}
+              onClick={() => setTaskOpen(true)}
+            >
+              任务{active > 0 ? ` · ${active}` : ""}
+            </Button>
             <span className="model-pill" title="已接入的创作模型">
               <Aperture size={14} />
               {models.filter((model) => model.available).length} / {models.length} 模型可用
@@ -168,6 +179,7 @@ export default function App() {
           )}
         </main>
       </div>
+      <TaskCenter open={taskOpen} onClose={() => setTaskOpen(false)} />
       <ToastHost />
     </div>
   );

@@ -29,6 +29,11 @@ GALLERY_FILES: tuple[tuple[str, str], ...] = (
     ("pose", "pose-zh.json"),
     ("costume", "costume-zh.json"),
     ("portrait", "portrait-zh.json"),
+    ("costume", "costume-shisei-zh.json"),
+)
+GALLERY_REMOTE_FILES: tuple[str, ...] = (
+    "costume-gia-anime-zh.json",
+    "costume-anime-zh.json",
 )
 GALLERY_TITLE_KEYS = {"pose": "姿势名称", "costume": "服装名称", "portrait": "标题"}
 
@@ -93,6 +98,7 @@ def _insert(conn: sqlite3.Connection, item: dict[str, Any]) -> str | None:
         (item["source"], item["external_id"]),
     )
     if exists:
+        _update_variant_fields(conn, exists["id"], item)
         return None
 
     item_id = item.get("id") or db.new_id()
@@ -100,9 +106,10 @@ def _insert(conn: sqlite3.Connection, item: dict[str, Any]) -> str | None:
         """
         INSERT INTO library_items
           (id, source, external_id, kind, title, subtitle, category, category_path,
-           tags, search_text, image_path, thumb_path, width, height, favorite, nsfw,
+           tags, search_text, image_path, thumb_path, depth_path, depth_thumb_path,
+           has_depth, group_key, variant_label, width, height, favorite, nsfw,
            meta, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
         """,
         (
             item_id,
@@ -117,6 +124,11 @@ def _insert(conn: sqlite3.Connection, item: dict[str, Any]) -> str | None:
             item.get("search_text", "")[:2000],
             item["image_path"],
             item.get("thumb_path"),
+            item.get("depth_path"),
+            item.get("depth_thumb_path"),
+            int(bool(item.get("has_depth"))),
+            item.get("group_key", ""),
+            item.get("variant_label", "")[:80],
             item.get("width"),
             item.get("height"),
             int(bool(item.get("nsfw"))),
@@ -131,6 +143,23 @@ def _insert(conn: sqlite3.Connection, item: dict[str, Any]) -> str | None:
             [(item_id, field, value, int(level)) for field, value, level in facets],
         )
     return item_id
+
+
+def _update_variant_fields(conn: sqlite3.Connection, item_id: str, item: dict[str, Any]) -> None:
+    fields: list[str] = []
+    args: list[Any] = []
+    for key in ("group_key", "variant_label", "depth_path", "depth_thumb_path"):
+        value = item.get(key)
+        if value:
+            fields.append(f"{key} = ?")
+            args.append(value)
+    if item.get("has_depth"):
+        fields.append("has_depth = 1")
+    if not fields:
+        return
+    conn.execute(
+        f"UPDATE library_items SET {', '.join(fields)} WHERE id = ?", (*args, item_id)
+    )
 
 
 def _classification_fields(classification: taxonomy.Classification) -> dict[str, Any]:
@@ -200,11 +229,38 @@ def _load_json(path: Path) -> list[dict]:
     return payload if isinstance(payload, list) else []
 
 
+def _shisei_views(entry: dict) -> list[dict]:
+    raw = entry.get("views")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            raw = []
+    return [view for view in raw if isinstance(view, dict)] if isinstance(raw, list) else []
+
+
+def _depth_files(base: Path, pose_id: str) -> tuple[Path | None, Path | None]:
+    if not pose_id:
+        return None, None
+    depth = thumb = None
+    for suffix in (".webp", ".png", ".jpg", ".jpeg"):
+        candidate = base / "img" / "depth" / f"{pose_id}{suffix}"
+        if candidate.is_file():
+            depth = candidate
+            break
+    for suffix in (".webp", ".png", ".jpg", ".jpeg"):
+        candidate = base / "thumbs" / "depth" / f"{pose_id}{suffix}"
+        if candidate.is_file():
+            thumb = candidate
+            break
+    return depth, thumb
+
+
 def import_pose_gallery(root: str) -> dict[str, Any]:
     """Adopt an existing ai-pose-gallery-zh checkout in place.
 
-    Expects ``data/pose-zh.json``, ``data/costume-zh.json`` and
-    ``data/portrait-zh.json`` plus the ``img/`` and ``thumbs/`` folders.
+    Expects the gallery JSON under ``data/`` plus ``img/`` and ``thumbs/``.
+    Local images are indexed in place; remote hotlinks are counted and skipped.
     """
 
     base = resolve_allowed(root)
@@ -212,30 +268,109 @@ def import_pose_gallery(root: str) -> dict[str, Any]:
     if not data_dir.exists():
         raise FileNotFoundError("没有找到 data/ 目录，请选择 ai-pose-gallery-zh 仓库根目录")
 
-    added = 0
-    total = 0
+    added = updated = scanned = skipped_missing = depth_added = 0
+    skipped_remote = 0
+    sources: dict[str, int] = {}
+    source_id = f"pose-gallery:{base}"
+
     with db.connect() as conn:
         for kind, filename in GALLERY_FILES:
             entries = _load_json(data_dir / filename)
-            total += len(entries)
+            scanned += len(entries)
+            sources[kind] = sources.get(kind, 0) + len(entries)
             title_key = GALLERY_TITLE_KEYS[kind]
             for entry in entries:
+                if filename == "costume-shisei-zh.json":
+                    views = _shisei_views(entry)
+                    if not views:
+                        views = [{"id": "selected", "label": "", "原图": entry.get("原图"), "预览图": entry.get("预览图"), "缩略图": entry.get("缩略图")}]
+                    for view in views:
+                        image_rel = view.get("原图") or view.get("预览图") or entry.get("原图")
+                        if not image_rel or str(image_rel).startswith(("http://", "https://")):
+                            skipped_remote += 1
+                            continue
+                        image_path = (base / image_rel).resolve()
+                        if not image_path.exists() or not is_allowed(image_path):
+                            skipped_missing += 1
+                            continue
+                        thumb_rel = view.get("缩略图") or entry.get("缩略图")
+                        thumb_path = (base / thumb_rel).resolve() if thumb_rel else None
+                        if not thumb_path or not thumb_path.exists():
+                            computed = _thumb(image_path)
+                            thumb_value = str(config.DATA_DIR / computed) if computed else None
+                        else:
+                            thumb_value = str(thumb_path)
+                        view_label = str(view.get("label") or "")
+                        set_title = str(entry.get(title_key) or entry.get("id") or "")
+                        payload = {
+                            **entry,
+                            "服装名称": f"{set_title} · {view_label}" if view_label else set_title,
+                            "视角": view_label,
+                            "id": f"{entry.get('id')}:{view.get('id')}",
+                        }
+                        classification = taxonomy.classify_costume(payload)
+                        external_id = f"costume-view:{entry.get('id')}:{view.get('id')}"
+                        item = {
+                            "source": source_id,
+                            "external_id": external_id,
+                            "kind": "costume",
+                            "title": payload["服装名称"],
+                            "subtitle": str(entry.get("id") or ""),
+                            **_classification_fields(classification),
+                            "image_path": str(image_path),
+                            "thumb_path": thumb_value,
+                            "group_key": f"shisei:{entry.get('id')}",
+                            "variant_label": view_label,
+                            "width": None,
+                            "height": None,
+                            "meta": {
+                                "set_id": entry.get("id"),
+                                "set_title": set_title,
+                                "view": view_label,
+                                "view_id": view.get("id"),
+                                "source_repo": "anhao/ai-pose-gallery-zh",
+                            },
+                        }
+                        exists = db.one(
+                            conn,
+                            "SELECT id FROM library_items WHERE source = ? AND external_id = ?",
+                            (source_id, external_id),
+                        )
+                        if exists:
+                            _update_variant_fields(conn, exists["id"], item)
+                            updated += 1
+                        else:
+                            added += int(bool(_insert(conn, item)))
+                    continue
+
                 image_rel = entry.get("原图") or entry.get("预览图")
                 if not image_rel:
                     continue
+                if str(image_rel).startswith(("http://", "https://")):
+                    skipped_remote += 1
+                    continue
                 image_path = (base / image_rel).resolve()
-                if not image_path.exists():
+                if not image_path.exists() or not is_allowed(image_path):
+                    skipped_missing += 1
                     continue
                 thumb_rel = entry.get("缩略图")
                 thumb_path = (base / thumb_rel).resolve() if thumb_rel else None
                 if thumb_path and thumb_path.exists():
                     thumb_value = str(thumb_path)
                 else:
-                    computed = Path(_thumb(image_path) or "")
-                    thumb_value = str(computed) if computed.exists() else None
+                    computed = _thumb(image_path)
+                    thumb_value = str(config.DATA_DIR / computed) if computed else None
 
                 classification = taxonomy.classify_entry(kind, entry)
                 title = str(entry.get(title_key) or entry.get("标题") or entry.get("名称") or entry.get("id") or "")
+                code = str(entry.get("姿势编号") or "")
+                pose_id = str(entry.get("id") or "")
+                angle = str(entry.get("角度") or "")
+                depth_path = depth_thumb = None
+                if kind == "pose":
+                    depth_path, depth_thumb = _depth_files(base, pose_id)
+                    if depth_path:
+                        depth_added += 1
                 meta: dict[str, Any] = {
                     "angle": entry.get("角度"),
                     "series": entry.get("体系"),
@@ -245,22 +380,60 @@ def import_pose_gallery(root: str) -> dict[str, Any]:
                 }
                 if kind == "portrait":
                     meta.update({"featured": entry.get("精选"), "popular": entry.get("热门")})
-
+                if kind == "pose":
+                    group_key = f"pose:{entry.get('体系')}:{code}" if code else f"pose:{pose_id}"
+                elif kind == "costume":
+                    group_key = f"costume:{pose_id}"
+                elif kind == "portrait":
+                    group_key = f"portrait:{pose_id}"
+                else:
+                    group_key = pose_id
                 item = {
-                    "source": f"pose-gallery:{base}",
-                    "external_id": f"{kind}:{entry.get('id')}",
+                    "source": source_id,
+                    "external_id": f"{kind}:{pose_id}",
                     "kind": kind,
                     "title": title,
                     "subtitle": str(entry.get("id") or ""),
                     **_classification_fields(classification),
                     "image_path": str(image_path),
                     "thumb_path": thumb_value,
+                    "depth_path": str(depth_path) if depth_path else None,
+                    "depth_thumb_path": str(depth_thumb) if depth_thumb else None,
+                    "has_depth": bool(depth_path),
+                    "group_key": group_key,
+                    "variant_label": angle,
                     "width": entry.get("宽") or None,
                     "height": entry.get("高") or None,
                     "meta": meta,
                 }
-                added += int(bool(_insert(conn, item)))
-    return {"added": added, "scanned": total, "root": str(base)}
+                exists = db.one(
+                    conn,
+                    "SELECT id FROM library_items WHERE source = ? AND external_id = ?",
+                    (source_id, item["external_id"]),
+                )
+                if exists:
+                    _update_variant_fields(conn, exists["id"], item)
+                    updated += 1
+                else:
+                    added += int(bool(_insert(conn, item)))
+
+        for filename in GALLERY_REMOTE_FILES:
+            for entry in _load_json(data_dir / filename):
+                scanned += 1
+                image_rel = entry.get("原图") or entry.get("预览图") or ""
+                if str(image_rel).startswith(("http://", "https://")):
+                    skipped_remote += 1
+
+    return {
+        "added": added,
+        "updated": updated,
+        "scanned": scanned,
+        "skipped_remote": skipped_remote,
+        "skipped_missing": skipped_missing,
+        "depth_added": depth_added,
+        "sources": sources,
+        "root": str(base),
+    }
 
 
 def add_uploaded(
@@ -348,6 +521,7 @@ def _scope(
     favorite: bool | None = None,
     selected: Iterable[tuple[str, str]] = (),
     exclude: Iterable[str] = (),
+    depth_only: bool = False,
     include_nsfw: bool = True,
 ) -> tuple[str, list[Any]]:
     """WHERE clause over ``library_items i`` for the current browse state."""
@@ -359,6 +533,8 @@ def _scope(
         args.append(kind)
     if not include_nsfw:
         clauses.append("i.nsfw = 0")
+    if depth_only:
+        clauses.append("i.has_depth = 1")
     for token in taxonomy.query_tokens(query):
         clauses.append("i.search_text LIKE ?")
         args.append(f"%{token}%")
@@ -410,6 +586,78 @@ def item_facets(conn: sqlite3.Connection, item_id: str) -> dict[str, list[str]]:
     return grouped
 
 
+def serialize_item(row: dict) -> dict[str, Any]:
+    item = dict(row)
+    item["meta"] = db.loads(item.get("meta"), {})
+    item["url"] = f"/api/library/{item['id']}/file"
+    item["thumb_url"] = f"/api/library/{item['id']}/file?size=thumb"
+    if item.get("has_depth") and item.get("depth_path"):
+        item["depth_url"] = f"/api/library/{item['id']}/file?variant=depth"
+        item["depth_thumb_url"] = f"/api/library/{item['id']}/file?variant=depth&size=thumb"
+    else:
+        item["depth_url"] = None
+        item["depth_thumb_url"] = None
+    item.pop("image_path", None)
+    item.pop("thumb_path", None)
+    item.pop("depth_path", None)
+    item.pop("depth_thumb_path", None)
+    item.pop("search_text", None)
+    return item
+
+
+def item_variants(conn: sqlite3.Connection, item_id: str) -> dict[str, Any] | None:
+    item = db.one(conn, "SELECT * FROM library_items WHERE id = ?", (item_id,))
+    if not item:
+        return None
+    group_key = item.get("group_key") or item.get("external_id") or item["id"]
+    rows = db.rows(
+        conn,
+        "SELECT * FROM library_items WHERE group_key = ? ORDER BY variant_label, created_at, title",
+        (group_key,),
+    )
+    _attach_facets(conn, rows)
+    return {"group_key": group_key, "items": [serialize_item(row) for row in rows]}
+
+
+def random_item(
+    conn: sqlite3.Connection,
+    *,
+    kind: str = "",
+    query: str = "",
+    category: str = "",
+    facets: Iterable[tuple[str, str]] = (),
+    exclude: Iterable[str] = (),
+    include_nsfw: bool = True,
+) -> dict[str, Any] | None:
+    where, args = _scope(
+        kind=kind,
+        query=query,
+        selected=facets,
+        exclude=exclude,
+        include_nsfw=include_nsfw,
+    )
+    if category:
+        where += (
+            " AND EXISTS (SELECT 1 FROM library_facets f WHERE f.item_id = i.id"
+            " AND f.level <= 2 AND f.value = ?)"
+        )
+        args.append(category)
+    excluded = [item for item in exclude if item]
+    if excluded:
+        marks = ",".join("?" for _ in excluded)
+        where += f" AND i.id NOT IN ({marks})"
+        args.extend(excluded)
+    row = db.one(
+        conn,
+        f"SELECT i.* FROM library_items i WHERE {where} ORDER BY RANDOM() LIMIT 1",
+        args,
+    )
+    if not row:
+        return None
+    _attach_facets(conn, [row])
+    return serialize_item(row)
+
+
 def list_items(
     conn: sqlite3.Connection,
     *,
@@ -418,6 +666,7 @@ def list_items(
     category: str = "",
     facets: Iterable[tuple[str, str]] = (),
     favorite: bool | None = None,
+    depth_only: bool = False,
     limit: int = 60,
     offset: int = 0,
     include_nsfw: bool = True,
@@ -427,6 +676,7 @@ def list_items(
         query=query,
         favorite=favorite,
         selected=facets,
+        depth_only=depth_only,
         include_nsfw=include_nsfw,
     )
     if category:
@@ -443,14 +693,12 @@ def list_items(
         [*args, limit, offset],
     )
     _attach_facets(conn, rows)
-    for row in rows:
-        row["meta"] = db.loads(row["meta"], {})
-        row["url"] = f"/api/library/{row['id']}/file"
-        row["thumb_url"] = f"/api/library/{row['id']}/file?size=thumb"
-        row.pop("image_path", None)
-        row.pop("thumb_path", None)
-        row.pop("search_text", None)
-    return {"items": rows, "total": total, "limit": limit, "offset": offset}
+    return {
+        "items": [serialize_item(row) for row in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 def _tree_for(
@@ -629,6 +877,8 @@ def facets(
         conn,
         "SELECT COUNT(*) FROM library_items" + ("" if include_nsfw else " WHERE nsfw = 0"),
     ) or 0
+    depth_where = "has_depth = 1" + ("" if include_nsfw else " AND nsfw = 0")
+    depth_total = db.scalar(conn, f"SELECT COUNT(*) FROM library_items WHERE {depth_where}") or 0
     return {
         "kinds": [{"kind": row["kind"], "count": row["count"], "label": taxonomy.KIND_LABEL.get(row["kind"], row["kind"])} for row in tree_kinds],
         "tree": tree,
@@ -637,6 +887,7 @@ def facets(
         "favorite": favorites,
         "nsfw_hidden": hidden,
         "visible_total": visible_total,
+        "depth_total": depth_total,
     }
 
 
@@ -660,14 +911,24 @@ def _source_entries(rows: list[dict]) -> dict[str, dict[str, dict]]:
     for source in {row["source"] for row in rows}:
         if not source.startswith("pose-gallery:"):
             continue
-        base = Path(source.split(":", 1)[1])
+        base = Path(source.removeprefix("pose-gallery:"))
         data_dir = base / "data"
         if not data_dir.exists():
             continue
         mapping: dict[str, dict] = {}
         for kind, filename in GALLERY_FILES:
             for entry in _load_json(data_dir / filename):
-                if entry.get("id"):
+                if not entry.get("id"):
+                    continue
+                if filename == "costume-shisei-zh.json":
+                    for view in _shisei_views(entry):
+                        mapping[f"costume-view:{entry['id']}:{view.get('id')}"] = {
+                            **entry,
+                            "服装名称": f"{entry.get('服装名称') or entry.get('id')} · {view.get('label') or ''}".strip(" ·"),
+                            "视角": view.get("label") or "",
+                            "id": f"{entry['id']}:{view.get('id')}",
+                        }
+                else:
                     mapping[f"{kind}:{entry['id']}"] = entry
         cache[source] = mapping
     return cache
@@ -787,14 +1048,77 @@ def ensure_taxonomy(conn: sqlite3.Connection) -> dict[str, Any] | None:
     return rebuild_taxonomy(conn)
 
 
-def file_for(conn: sqlite3.Connection, item_id: str, prefer_thumb: bool) -> tuple[Path, str]:
+def ensure_variants(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    """Backfill group keys and pose depth companions for libraries imported before v6."""
+
+    if db.scalar(conn, "SELECT v FROM app_meta WHERE k = 'library_variants'") == "2":
+        return None
+    rows = db.rows(
+        conn,
+        "SELECT id, source, external_id, kind, group_key, variant_label, depth_path, meta "
+        "FROM library_items WHERE kind = 'pose' OR group_key = '' "
+        "OR (kind = 'pose' AND depth_path IS NULL)",
+    )
+    changed = depth_found = 0
+    for row in rows:
+        updates: dict[str, Any] = {}
+        meta = db.loads(row.get("meta"), {})
+        if row["kind"] == "pose":
+            series = str(meta.get("series") or "")
+            code = str(meta.get("code") or "")
+            desired = f"pose:{series}:{code}" if code and series else (f"pose:{code}" if code else (row.get("external_id") or row["id"]))
+            if desired != row.get("group_key"):
+                updates["group_key"] = desired
+        elif not row.get("group_key"):
+            updates["group_key"] = row.get("external_id") or row["id"]
+        if row["kind"] == "pose" and not row.get("variant_label") and meta.get("angle"):
+            updates["variant_label"] = str(meta.get("angle"))
+        if row["kind"] == "pose" and not row.get("depth_path"):
+            source = str(row.get("source") or "")
+            if source.startswith("pose-gallery:"):
+                base = Path(source.removeprefix("pose-gallery:"))
+                pose_id = str(row.get("external_id") or "")
+                if pose_id.startswith("pose:"):
+                    pose_id = pose_id[5:]
+                if base.exists():
+                    depth, thumb = _depth_files(base, pose_id)
+                    if depth and is_allowed(depth):
+                        updates["depth_path"] = str(depth)
+                        updates["has_depth"] = 1
+                        if thumb and is_allowed(thumb):
+                            updates["depth_thumb_path"] = str(thumb)
+                        depth_found += 1
+        if not updates:
+            continue
+        columns = ", ".join(f"{key} = ?" for key in updates)
+        conn.execute(
+            f"UPDATE library_items SET {columns} WHERE id = ?",
+            (*updates.values(), row["id"]),
+        )
+        changed += 1
+    conn.execute(
+        "INSERT INTO app_meta(k, v) VALUES ('library_variants', '2') "
+        "ON CONFLICT(k) DO UPDATE SET v = excluded.v"
+    )
+    return {"items": changed, "depth": depth_found}
+
+
+def file_for(
+    conn: sqlite3.Connection, item_id: str, prefer_thumb: bool, variant: str = "base"
+) -> tuple[Path, str]:
     item = db.one(conn, "SELECT * FROM library_items WHERE id = ?", (item_id,))
     if not item:
         raise FileNotFoundError("素材不存在")
     candidates: list[Path] = []
-    if prefer_thumb and item.get("thumb_path"):
-        candidates.append(Path(item["thumb_path"]))
-    candidates.append(Path(item["image_path"]))
+    if variant == "depth":
+        if prefer_thumb and item.get("depth_thumb_path"):
+            candidates.append(Path(item["depth_thumb_path"]))
+        if item.get("depth_path"):
+            candidates.append(Path(item["depth_path"]))
+    else:
+        if prefer_thumb and item.get("thumb_path"):
+            candidates.append(Path(item["thumb_path"]))
+        candidates.append(Path(item["image_path"]))
     for candidate in candidates:
         if candidate.exists() and is_allowed(candidate):
             return candidate.resolve(), "image"
@@ -821,14 +1145,18 @@ __all__ = [
     "categories",
     "delete_item",
     "ensure_taxonomy",
+    "ensure_variants",
     "facets",
     "file_for",
     "import_folder",
     "import_pose_gallery",
     "item_facets",
+    "item_variants",
     "list_items",
+    "random_item",
     "rebuild_taxonomy",
     "resolve_allowed",
+    "serialize_item",
     "storage",
     "taxonomy",
 ]

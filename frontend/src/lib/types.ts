@@ -79,6 +79,10 @@ export interface JobAsset {
   model_name?: string;
   params?: Record<string, unknown>;
   created_at?: string;
+  parent_id?: string | null;
+  root_id?: string | null;
+  tool?: string;
+  version?: number;
   url: string;
   thumb_url: string;
   download_url?: string;
@@ -136,13 +140,50 @@ export interface Asset {
   params: Record<string, unknown>;
   favorite: boolean;
   tags: string;
-  origin: "generated" | "upload";
+  origin: AssetOrigin;
   job_id: string | null;
+  parent_id: string | null;
+  root_id: string | null;
+  tool: string;
+  version: number;
   created_at: string;
   meta: Record<string, unknown>;
   url: string;
   thumb_url: string;
   download_url: string;
+}
+
+export type AssetOrigin = "generated" | "upload" | "url" | "upscaled" | "split";
+
+export interface AssetRef {
+  role: string;
+  name: string;
+  source: "asset" | "library";
+  id: string;
+  variant: "base" | "depth";
+  url: string;
+  thumb_url: string;
+  missing: boolean;
+}
+
+export interface PromptItem {
+  id: string;
+  title: string;
+  category: "quality" | "camera" | "lighting" | "style" | "custom";
+  text: string;
+  negative: string;
+  tags: string;
+  favorite: boolean;
+  builtin: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PromptEnhanceResult {
+  prompt: string;
+  negative: string;
+  notes: string[];
+  style: string;
 }
 
 export interface LibraryItem {
@@ -157,6 +198,11 @@ export interface LibraryItem {
   tags: string;
   image_path: string;
   thumb_path: string | null;
+  depth_url: string | null;
+  depth_thumb_url: string | null;
+  has_depth: number | boolean;
+  group_key: string;
+  variant_label: string;
   width: number | null;
   height: number | null;
   favorite: number;
@@ -201,6 +247,7 @@ export interface LibraryFacets {
   visible_total: number;
   favorite: number;
   nsfw_hidden: number;
+  depth_total: number;
   roots: string[];
 }
 
@@ -243,6 +290,7 @@ export interface RefInput {
   library_id?: string;
   role: string;
   name?: string;
+  variant?: "base" | "depth";
 }
 
 export interface GenerateRequest {
@@ -254,6 +302,10 @@ export interface GenerateRequest {
   refs: RefInput[];
   style?: string;
   source?: string;
+  tool?: "" | "extract_costume" | "refine" | "inpaint" | "character";
+  options?: Record<string, unknown>;
+  mask?: string;
+  matrix_id?: string;
 }
 
 export interface GenerateResult {

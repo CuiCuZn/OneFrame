@@ -5,10 +5,13 @@ import {
   FolderInput,
   Heart,
   Images,
+  Layers,
+  Link2,
   Loader2,
   RefreshCw,
   RotateCcw,
   Search,
+  Shirt,
   Star,
   Trash2,
   Upload,
@@ -17,7 +20,8 @@ import {
 import { api, ApiError } from "../lib/api";
 import { useStore } from "../lib/store";
 import { usePersistentState } from "../lib/hooks";
-import type { LibraryFacets, LibraryItem, LibraryTree } from "../lib/types";
+import type { Asset, LibraryFacets, LibraryItem, LibraryTree } from "../lib/types";
+import CostumeExtractModal from "../components/CostumeExtractModal";
 import {
   Badge,
   Button,
@@ -54,6 +58,7 @@ export default function Library({ onUse }: { onUse: () => void }) {
   const { catalog, toast } = useStore();
   const [kind, setKind] = usePersistentState("of.lib.kind", "");
   const [favorite, setFavorite] = useState(false);
+  const [depthOnly, setDepthOnly] = usePersistentState("of.lib.depth", false);
   const [query, setQuery] = useState("");
   const search = useDebounced(query, 260);
   const [selected, setSelected] = useState<Record<string, string[]>>({});
@@ -65,6 +70,12 @@ export default function Library({ onUse }: { onUse: () => void }) {
   const [loading, setLoading] = useState(true);
   const [importOpen, setImportOpen] = useState(false);
   const [detail, setDetail] = useState<LibraryItem | null>(null);
+  const [detailVariant, setDetailVariant] = useState<"base" | "depth">("base");
+  const [variants, setVariants] = useState<LibraryItem[]>([]);
+  const [urlOpen, setUrlOpen] = useState(false);
+  const [urlValue, setUrlValue] = useState("");
+  const [urlBusy, setUrlBusy] = useState(false);
+  const [costumeOpen, setCostumeOpen] = useState(false);
   const [offset, setOffset] = useState(0);
   const [total, setTotal] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -94,6 +105,7 @@ export default function Library({ onUse }: { onUse: () => void }) {
           q: search,
           favorite: favorite || undefined,
           facets: selectedList,
+          depth: depthOnly || undefined,
           limit: PAGE_SIZE,
           offset: nextOffset,
         });
@@ -109,7 +121,7 @@ export default function Library({ onUse }: { onUse: () => void }) {
         if (request === listReq.current) setLoading(false);
       }
     },
-    [kind, search, favorite, selectedList, toast],
+    [kind, search, favorite, depthOnly, selectedList, toast],
   );
 
   const loadFacets = useCallback(async () => {
@@ -135,8 +147,30 @@ export default function Library({ onUse }: { onUse: () => void }) {
     void loadFacets();
   }, [loadFacets]);
 
-  const useItem = (item: LibraryItem, role: string) => {
-    window.localStorage.setItem("of.pendingRef", JSON.stringify({ item, role }));
+  useEffect(() => {
+    if (!detail) {
+      setVariants([]);
+      setDetailVariant("base");
+      return;
+    }
+    let alive = true;
+    setDetailVariant("base");
+    api.library
+      .variants(detail.id)
+      .then((data) => {
+        if (alive) setVariants(data.items);
+      })
+      .catch(() => {
+        if (alive) setVariants([detail]);
+      });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail?.id]);
+
+  const useItem = (item: LibraryItem, role: string, variant: "base" | "depth" = "base") => {
+    window.localStorage.setItem("of.pendingRef", JSON.stringify({ item, role, variant }));
     setDetail(null);
     toast(`已作为「${catalog?.roles.find((r) => r.id === role)?.name ?? role}」带入创作台`, "success");
     onUse();
@@ -173,6 +207,34 @@ export default function Library({ onUse }: { onUse: () => void }) {
       toast(error instanceof ApiError ? error.message : "上传失败", "error");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const importFromUrl = async () => {
+    const value = urlValue.trim();
+    if (!value) return toast("先填写图片地址", "error");
+    setUrlBusy(true);
+    try {
+      const asset = await api.assets.importUrl(value);
+      const result = await api.library.fromAsset(asset.id);
+      toast(result.created ? "已从 URL 导入参考库" : "这张图已经在参考库里了", result.created ? "success" : "info");
+      setUrlOpen(false);
+      setUrlValue("");
+      await Promise.all([load(0), loadFacets()]);
+    } catch (error) {
+      toast(error instanceof ApiError ? error.message : "URL 导入失败", "error");
+    } finally {
+      setUrlBusy(false);
+    }
+  };
+
+  const addExtractedToLibrary = async (asset: Pick<Asset, "id" | "thumb_url" | "url" | "prompt">) => {
+    try {
+      const result = await api.library.fromAsset(asset.id);
+      toast(result.created ? "提取结果已存入参考库" : "提取结果已经在参考库里了", result.created ? "success" : "info");
+      await Promise.all([load(0), loadFacets()]);
+    } catch (error) {
+      toast(error instanceof ApiError ? error.message : "存入参考库失败", "error");
     }
   };
 
@@ -238,6 +300,7 @@ export default function Library({ onUse }: { onUse: () => void }) {
   const clearFilters = () => {
     setQuery("");
     setFavorite(false);
+    setDepthOnly(false);
     setSelected({});
   };
 
@@ -262,6 +325,12 @@ export default function Library({ onUse }: { onUse: () => void }) {
           <>
             <Button variant="soft" icon={<FolderInput size={15} />} onClick={() => setImportOpen(true)}>
               导入文件夹
+            </Button>
+            <Button variant="ghost" icon={<Link2 size={15} />} onClick={() => setUrlOpen(true)}>
+              从 URL 导入
+            </Button>
+            <Button variant="ghost" icon={<Shirt size={15} />} onClick={() => setCostumeOpen(true)}>
+              提取服饰
             </Button>
             <label className="btn btn-primary btn-md" style={{ cursor: "pointer" }}>
               <Upload size={15} />
@@ -317,6 +386,14 @@ export default function Library({ onUse }: { onUse: () => void }) {
                 <Heart size={13} />
                 <span>收藏</span>
                 <em>{facets.favorite}</em>
+              </button>
+              <button
+                className={`lib-kind ${depthOnly ? "is-active" : ""}`}
+                onClick={() => setDepthOnly((value) => !value)}
+              >
+                <Layers size={13} />
+                <span>有深度图</span>
+                <em>{facets.depth_total}</em>
               </button>
 
               <div className="lib-side-title">按分类浏览</div>
@@ -498,6 +575,7 @@ export default function Library({ onUse }: { onUse: () => void }) {
                   {items.map((item) => (
                     <div className="lib-card" key={item.id} onClick={() => setDetail(item)}>
                       <img src={item.thumb_url} alt={item.title} loading="lazy" />
+                      {Boolean(item.has_depth) && <span className="lib-depth-badge">深度</span>}
                       <button
                         className={`lib-fav ${item.favorite ? "is-on" : ""}`}
                         onClick={(event) => {
@@ -588,9 +666,7 @@ export default function Library({ onUse }: { onUse: () => void }) {
         open={importOpen}
         roots={facets?.roots ?? []}
         onClose={() => setImportOpen(false)}
-        onDone={async (message) => {
-          toast(message, "success");
-          setImportOpen(false);
+        onImported={async () => {
           await Promise.all([load(0), loadFacets()]);
         }}
         onReclassified={async (message) => {
@@ -598,6 +674,41 @@ export default function Library({ onUse }: { onUse: () => void }) {
           setSelected({});
           await Promise.all([load(0), loadFacets()]);
         }}
+      />
+
+      <Modal
+        open={urlOpen}
+        title="从 URL 导入参考"
+        subtitle="只支持 http/https 图片，单张不超过 25MB；内网地址会被拒绝"
+        onClose={() => setUrlOpen(false)}
+        width={520}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setUrlOpen(false)}>
+              取消
+            </Button>
+            <Button variant="primary" loading={urlBusy} onClick={() => void importFromUrl()}>
+              导入
+            </Button>
+          </>
+        }
+      >
+        <input
+          className="input"
+          value={urlValue}
+          onChange={(event) => setUrlValue(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") void importFromUrl();
+          }}
+          placeholder="https://example.com/reference.png"
+          autoFocus
+        />
+      </Modal>
+
+      <CostumeExtractModal
+        open={costumeOpen}
+        onClose={() => setCostumeOpen(false)}
+        onUse={(asset) => void addExtractedToLibrary(asset)}
       />
 
       {detail && (
@@ -621,7 +732,7 @@ export default function Library({ onUse }: { onUse: () => void }) {
               </Button>
               <span className="grow" />
               {(catalog?.roles ?? []).map((role) => (
-                <Button key={role.id} variant="soft" onClick={() => useItem(detail, role.id)}>
+                <Button key={role.id} variant="soft" onClick={() => useItem(detail, role.id, detailVariant)}>
                   用作{role.name}
                 </Button>
               ))}
@@ -630,7 +741,7 @@ export default function Library({ onUse }: { onUse: () => void }) {
         >
           <div className="row" style={{ alignItems: "flex-start", gap: 16 }}>
             <img
-              src={detail.url}
+              src={detailVariant === "depth" && detail.depth_url ? detail.depth_url : detail.url}
               alt=""
               style={{ maxHeight: 420, maxWidth: "58%", borderRadius: 12, objectFit: "contain", background: "#0b0d10" }}
             />
@@ -644,7 +755,23 @@ export default function Library({ onUse }: { onUse: () => void }) {
                 <span>{detail.width && detail.height ? `${detail.width} × ${detail.height}` : "—"}</span>
                 <b>分类</b>
                 <span>{detail.category_path || detail.category || "—"}</span>
+                {detail.variant_label && (
+                  <>
+                    <b>视角</b>
+                    <span>{detail.variant_label}</span>
+                  </>
+                )}
               </div>
+              {Boolean(detail.has_depth) && (
+                <Button
+                  variant="soft"
+                  size="sm"
+                  icon={<Layers size={14} />}
+                  onClick={() => setDetailVariant((value) => (value === "depth" ? "base" : "depth"))}
+                >
+                  {detailVariant === "depth" ? "查看白模" : "查看深度图"}
+                </Button>
+              )}
               {Object.keys(detail.facets ?? {}).length > 0 ? (
                 <div className="detail-facets">
                   {Object.entries(detail.facets).map(([field, values]) => (
@@ -674,6 +801,25 @@ export default function Library({ onUse }: { onUse: () => void }) {
               </p>
             </div>
           </div>
+          {variants.length > 1 && (
+            <div className="detail-variants">
+              <span className="facet-label">视角</span>
+              <div className="detail-variant-strip">
+                {variants.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`detail-variant ${item.id === detail.id ? "is-active" : ""}`}
+                    onClick={() => setDetail(item)}
+                    title={item.variant_label || item.title}
+                  >
+                    <img src={item.thumb_url} alt="" loading="lazy" />
+                    <span>{item.variant_label || "视角"}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </Modal>
       )}
     </>
@@ -684,13 +830,13 @@ function ImportModal({
   open,
   roots,
   onClose,
-  onDone,
+  onImported,
   onReclassified,
 }: {
   open: boolean;
   roots: string[];
   onClose: () => void;
-  onDone: (message: string) => Promise<void>;
+  onImported: () => Promise<void>;
   onReclassified: (message: string) => Promise<void>;
 }) {
   const { toast } = useStore();
@@ -699,13 +845,23 @@ function ImportModal({
   const [kind, setKind] = useState("other");
   const [busy, setBusy] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
+  const [report, setReport] = useState<{
+    added: number;
+    updated?: number;
+    scanned: number;
+    skipped_remote?: number;
+    skipped_missing?: number;
+    depth_added?: number;
+  } | null>(null);
 
   const run = async () => {
     if (!path.trim()) return toast("请填写本地路径", "error");
     setBusy(true);
     try {
       const result = await api.library.import(mode, path.trim(), kind);
-      await onDone(`已索引 ${result.added} 条素材（扫描 ${result.scanned} 条）`);
+      setReport(result);
+      await onImported();
+      toast(`已索引 ${result.added} 条素材`, "success");
     } catch (error) {
       toast(error instanceof ApiError ? error.message : "导入失败", "error");
     } finally {
@@ -739,11 +895,13 @@ function ImportModal({
           </Button>
           <span className="grow" />
           <Button variant="ghost" onClick={onClose}>
-            取消
+            {report ? "完成" : "取消"}
           </Button>
-          <Button variant="primary" loading={busy} onClick={() => void run()}>
-            开始索引
-          </Button>
+          {!report && (
+            <Button variant="primary" loading={busy} onClick={() => void run()}>
+              开始索引
+            </Button>
+          )}
         </>
       }
     >
@@ -753,7 +911,7 @@ function ImportModal({
           onClick={() => setMode("pose_gallery")}
         >
           <strong>姿势图库仓库</strong>
-          <em>指向 ai-pose-gallery-zh 根目录，自动读取三个 JSON 索引</em>
+          <em>读取姿势 / 服装 / 人像 / 中国历代服饰索引，并关联本地深度图</em>
         </button>
         <button
           className={`protocol-option ${mode === "folder" ? "is-active" : ""}`}
@@ -783,6 +941,24 @@ function ImportModal({
             <option value="custom">自定义</option>
           </select>
         </Field>
+      )}
+
+      {report && (
+        <div className="import-report">
+          <div className="import-report-grid">
+            <span>新增</span><strong>{report.added}</strong>
+            <span>更新</span><strong>{report.updated ?? 0}</strong>
+            <span>扫描</span><strong>{report.scanned}</strong>
+            <span>深度图</span><strong>{report.depth_added ?? 0}</strong>
+            <span>远程跳过</span><strong>{report.skipped_remote ?? 0}</strong>
+            <span>文件缺失</span><strong>{report.skipped_missing ?? 0}</strong>
+          </div>
+          {Boolean(report.skipped_remote) && (
+            <p className="hint-block">
+              远程热链素材未下载、未写入索引。需要时请把原图下载到本地文件夹，再按「任意文件夹」导入。
+            </p>
+          )}
+        </div>
       )}
 
       <div className="hint-block">

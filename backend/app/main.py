@@ -11,12 +11,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from . import config, db
-from .api import assets, channels, generate, jobs, library, models, system
+from .api import assets, channels, generate, jobs, library, models, prompts, system
 from .core import library as library_core
 from .core import worker
 from .errors import AppError
 from .providers import catalog as protocol_catalog
-from .seed import seed_if_empty
+from .seed import seed_if_empty, seed_pollinations, seed_prompts
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("oneframe")
@@ -30,7 +30,12 @@ async def lifespan(app: FastAPI):
     db.init_db()
     with db.connect() as conn:
         seed_if_empty(conn)
+        seed_pollinations(conn)
+        seed_prompts(conn)
+        variants = library_core.ensure_variants(conn)
         upgraded = library_core.ensure_taxonomy(conn)
+    if variants:
+        log.info("reference library variants: %s items, %s depth maps", variants["items"], variants["depth"])
     if upgraded:
         log.info("reference library reclassified: %s items, %s facets", upgraded["items"], upgraded["facets"])
     await worker.runner.start()
@@ -58,7 +63,7 @@ async def app_error_handler(_request: Request, exc: AppError):
     )
 
 
-for module in (channels, models, generate, jobs, assets, library, system):
+for module in (channels, models, generate, jobs, assets, library, prompts, system):
     app.include_router(module.router)
 
 
