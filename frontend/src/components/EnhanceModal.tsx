@@ -3,7 +3,9 @@ import { Loader2, Sparkles } from "lucide-react";
 import { api, ApiError } from "../lib/api";
 import { useStore } from "../lib/store";
 import type { PromptEnhanceResult } from "../lib/types";
-import { Button, Modal } from "./ui";
+import { Badge, Button, Modal } from "./ui";
+
+type EnhanceMode = "llm" | "rules";
 
 export default function EnhanceModal({
   open,
@@ -27,6 +29,7 @@ export default function EnhanceModal({
   const { toast } = useStore();
   const [result, setResult] = useState<PromptEnhanceResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [mode, setMode] = useState<EnhanceMode>("llm");
 
   useEffect(() => {
     if (!open) return;
@@ -36,6 +39,7 @@ export default function EnhanceModal({
     }
     let alive = true;
     setLoading(true);
+    setResult(null);
     api
       .enhancePrompt({
         prompt,
@@ -44,6 +48,7 @@ export default function EnhanceModal({
         modality,
         has_refs: hasRefs,
         language: "zh",
+        mode,
       })
       .then((data) => {
         if (alive) setResult(data);
@@ -58,13 +63,18 @@ export default function EnhanceModal({
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, prompt, negative, style, modality, hasRefs]);
+  }, [open, prompt, negative, style, modality, hasRefs, mode]);
+
+  const subtitle =
+    mode === "llm"
+      ? "GLM 5.3 Flash 改写，失败自动回退本地规则；结果仍可继续编辑"
+      : "本地规则补全，不调用大模型；结果仍可继续编辑";
 
   return (
     <Modal
       open={open}
       title="提示词增强"
-      subtitle="本地规则补全，不调用大模型；结果仍可继续编辑"
+      subtitle={subtitle}
       onClose={onClose}
       width={760}
       footer={
@@ -72,10 +82,17 @@ export default function EnhanceModal({
           <Button variant="ghost" onClick={onClose}>
             取消
           </Button>
+          <Button
+            variant="soft"
+            disabled={loading}
+            onClick={() => setMode(mode === "llm" ? "rules" : "llm")}
+          >
+            {mode === "llm" ? "改用规则" : "改用 AI"}
+          </Button>
           <span className="grow" />
           <Button
             variant="primary"
-            disabled={!result}
+            disabled={!result || loading}
             onClick={() => {
               if (!result) return;
               onApply(result.prompt, result.negative);
@@ -89,7 +106,8 @@ export default function EnhanceModal({
     >
       {loading ? (
         <div className="tool-hint">
-          <Loader2 size={15} className="spin" /> 正在按规则补全…
+          <Loader2 size={15} className="spin" />
+          {mode === "llm" ? "正在用 GLM 5.3 Flash 改写…" : "正在按规则补全…"}
         </div>
       ) : !result ? (
         <p className="hint-block">先写一句提示词，再使用增强。</p>
@@ -102,6 +120,11 @@ export default function EnhanceModal({
           <div>
             <span className="tool-label">
               <Sparkles size={12} /> 增强后
+              {result.source === "llm" ? (
+                <Badge tone="accent">AI 改写</Badge>
+              ) : (
+                <Badge tone="warn">本地规则</Badge>
+              )}
             </span>
             <div className="lb-prompt">{result.prompt}</div>
             <ul className="enhance-notes">

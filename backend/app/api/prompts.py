@@ -1,4 +1,4 @@
-"""Prompt library CRUD and deterministic local enhancement."""
+"""Prompt library CRUD and prompt enhancement (LLM or local rules)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import sqlite3
 from fastapi import APIRouter, Depends, Query
 
 from .. import db
-from ..core import prompt_enhance
+from ..core import prompt_enhance, prompt_rewrite
 from ..errors import Conflict, NotFound
 from .deps import get_conn
 from .schemas import EnhanceIn, PromptIn
@@ -132,5 +132,8 @@ def delete_prompt(prompt_id: str, conn: sqlite3.Connection = Depends(get_conn)):
 
 
 @router.post("/prompt/enhance")
-def enhance_prompt(data: EnhanceIn):
-    return prompt_enhance.enhance(data.model_dump())
+async def enhance_prompt(data: EnhanceIn, conn: sqlite3.Connection = Depends(get_conn)):
+    payload = data.model_dump()
+    if payload.pop("mode") == "llm":
+        return await prompt_rewrite.rewrite(conn, payload)
+    return prompt_enhance.enhance(payload)

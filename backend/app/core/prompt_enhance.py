@@ -57,4 +57,6 @@ def enhance(payload: dict[str, Any]) -> dict[str, Any]:
         "negative": negative,
         "notes": notes,
         "style": style["id"],
+        "source": "rules",
+        "model": "",
     }

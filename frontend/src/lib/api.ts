@@ -275,6 +275,7 @@ export const api = {
     modality?: string;
     has_refs?: boolean;
     language?: string;
+    mode?: "llm" | "rules";
   }) => request<PromptEnhanceResult>("/api/prompt/enhance", json(body)),
   system: () => request<SystemInfo>("/api/system"),
   settings: {

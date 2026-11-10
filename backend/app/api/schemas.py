@@ -139,6 +139,7 @@ class EnhanceIn(BaseModel):
     modality: Literal["image", "video"] = "image"
     has_refs: bool = False
     language: Literal["zh", "en"] = "zh"
+    mode: Literal["rules", "llm"] = "rules"
 
 
 class LibraryPatch(BaseModel):

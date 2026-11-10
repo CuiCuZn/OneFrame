@@ -184,6 +184,9 @@ export interface PromptEnhanceResult {
   negative: string;
   notes: string[];
   style: string;
+  source: "llm" | "rules";
+  model: string;
+  fallback_reason?: string;
 }
 
 export interface LibraryItem {
